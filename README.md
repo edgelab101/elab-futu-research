@@ -34,7 +34,7 @@ bash install.sh
 | 第三方依赖 | 无 |
 | API Key | 无需；不登录、不读取 Cookie |
 
-如只运行 CLI 而不使用安装脚本，Windows 的 PowerShell/CMD 也可以直接调用 `python3 scripts/futu_research.py`。
+如只运行 CLI 而不使用安装脚本，Windows 的 PowerShell/CMD 可先 `cd elab-futu-research` 再调用 `python3 scripts\futu_research.py`，或从仓库根目录用完整路径 `python3 elab-futu-research\scripts\futu_research.py`。Python 3.9+ 在 Windows 下无需额外安装 tzdata，脚本遇到时区初始化失败时会自动 fallback 到固定 UTC+8，不影响核心功能。
 
 ### 在 Codex 中
 
@@ -129,6 +129,14 @@ futu-research-output/
 - 核心归档、标准化、审计使用 Python 标准库
 - 行情按“本地 CSV → 无 Key 公共日线接口”的顺序尝试；每条记录写明真实来源，接口失败时明确记录缺失
 - OCR/图片理解是可选能力，由 Codex、Claude Code 或本机可用工具完成
+
+## 运行测试
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+标准库即可运行，无需安装 pytest。如已安装 pytest，也可用 `pytest tests/`。
 
 ## 账号安全 FAQ
 

@@ -7,7 +7,7 @@ description: Archive a Futu/Moomoo public profile's visible dynamics and columns
 
 Turn one or more public Futu profile URLs into a resumable archive and an evidence-bounded research report. Make the default experience one-shot: accept the URL, choose safe defaults, run the workflow, and return the report plus audit status.
 
-Version: `1.1.1` · Last updated: `2026-07-22`
+Version: `1.1.2` · Last updated: `2026-07-22`
 
 ## Startup alignment (required)
 
@@ -42,13 +42,23 @@ Then proceed with the workflow.
 
 ## Fast path
 
-From the repository or installed skill directory:
+Locate the script before running. The path depends on how the skill was installed:
+
+| Installation | Script path |
+|---|---|
+| Claude Code | `~/.claude/skills/elab-futu-research/scripts/futu_research.py` |
+| Codex | `~/.codex/skills/elab-futu-research/scripts/futu_research.py` |
+| Repo clone | `elab-futu-research/scripts/futu_research.py` (run from repo root) |
+
+All commands below use the relative form `scripts/futu_research.py`; substitute the full prefix from the table above when running outside the skill directory.
 
 ```bash
 python3 scripts/futu_research.py run \
   --profile "https://q.futunn.com/profile/<uid>" \
   --output "./futu-research-output"
 ```
+
+`run` is a machine-only exploratory pipeline: it executes all steps in sequence and marks every output as `exploratory`. Human claim review (step 3) can be performed after `run` completes; re-run `market` and `report` afterwards to incorporate reviewed decisions. To enforce the claim-freeze gate strictly — no outcome data visible before claims are frozen — run the steps individually in the order documented below. Both modes are valid; choose based on whether human review happens before or after outcome enrichment.
 
 For multiple bloggers, repeat `--profile`. Optional `--since YYYY-MM-DD` and `--until YYYY-MM-DD` limit the archive. Use `--skip-media` only when requested.
 
@@ -58,6 +68,8 @@ Run the environment and endpoint check first when the interface may have changed
 python3 scripts/futu_research.py doctor \
   --profile "https://q.futunn.com/profile/<uid>"
 ```
+
+`--profile` is optional for `doctor`: without it, only local environment checks run and the overall status is reported as `PARTIAL` (endpoint checks skipped).
 
 ## Workflow
 
@@ -145,17 +157,25 @@ The run directory contains:
 ```text
 raw/list/<uid>/{all,columns}/page_*.json
 raw/details/<uid>/<feed_id>.json
+raw/feed_index.json
+raw/media_manifest.json
 media/<uid>/<feed_id>/*
 archive/posts.jsonl
 archive/posts.csv
 archive/monthly/*.md
 analysis/candidates.jsonl
+analysis/prepare_summary.json
+analysis/review_guide.md
 analysis/claims.reviewed.jsonl
 analysis/episodes.jsonl
+analysis/market/claims_market.jsonl
+analysis/market/market_manifest.json
+analysis/market/raw/*.json
 analysis/market/*.csv
 reports/profile.md
 reports/capability_matrix.md
 reports/rule_cards.md
+reports/report_manifest.json
 qa/crawl_audit.json
 qa/adversarial_audit.json
 manifest.json

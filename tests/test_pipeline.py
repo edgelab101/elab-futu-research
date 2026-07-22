@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
@@ -366,6 +367,149 @@ class PipelineTest(unittest.TestCase):
             url_set_display,
             msg="dict-valued display key must be collected via .url extraction",
         )
+
+
+    # ------ F9: version ------
+    def test_version_string(self):
+        """VERSION constant must be bumped to 1.1.2 (F9)."""
+        self.assertEqual(FR.VERSION, "1.1.2")
+
+    # ------ F1: OSError in main exits 2 cleanly ------
+    def test_output_file_path_exits_cleanly(self):
+        """When --output points to an existing file, exit 2 with ERROR, no traceback (F1)."""
+        with tempfile.NamedTemporaryFile() as tmp_file:
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as mock_err:
+                result = FR.main(
+                    ["archive", "--profile", "12345",
+                     "--since", "2026-07-22",
+                     "--output", tmp_file.name]
+                )
+            err_text = mock_err.getvalue()
+        self.assertEqual(result, 2, "exit code must be 2 for OSError")
+        self.assertIn("ERROR", err_text, "stderr must contain ERROR prefix")
+        self.assertNotIn("Traceback", err_text, "raw traceback must not appear in stderr")
+
+    # ------ F2: zero posts note ------
+    def test_archive_zero_posts_note(self):
+        """Archive with 0 posts must log a note suggesting UID verification (F2)."""
+        uid = "99999999"
+        _empty_audit = {
+            "profile_uid": uid,
+            "stream": "all",
+            "feed_type": 301,
+            "pages_saved": 1,
+            "unique_feed_ids": 0,
+            "terminal_reason": "has_more_zero",
+            "complete_for_request": True,
+            "pages": [],
+            "errors": [],
+        }
+        _empty_audit2 = dict(_empty_audit, stream="columns", feed_type=302)
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            archive_args = argparse.Namespace(
+                profile=[uid],
+                since=None,
+                until=None,
+                output=str(output),
+                skip_media=True,
+                detail_workers=2,
+                media_workers=2,
+                max_pages=20,
+                refresh=False,
+            )
+            with mock.patch.object(FR, "crawl_stream",
+                                   side_effect=[({}, _empty_audit), ({}, _empty_audit2)]):
+                with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+                    FR.archive(archive_args)
+                stdout_text = mock_out.getvalue()
+        self.assertIn("0 posts returned", stdout_text,
+                      "zero-posts note must appear in stdout when posts==0")
+        self.assertIn("verify the uid", stdout_text.lower(),
+                      "note must suggest UID verification")
+
+    # ------ F3: doctor PARTIAL without profile ------
+    def test_doctor_partial_without_profile(self):
+        """doctor without --profile must report PARTIAL status (F3)."""
+        args = argparse.Namespace(output=None, profile=None)
+        with mock.patch("sys.stdout", new_callable=io.StringIO):
+            result = FR.doctor(args)
+        self.assertEqual(result["status"], "PARTIAL",
+                         "doctor without profile must return PARTIAL, not PASS")
+        self.assertIn("note", result, "PARTIAL result must include a note field")
+
+    # ------ F4: ZoneInfo fallback ------
+    def test_zoneinfo_fallback(self):
+        """_resolve_cn_tz must fall back to UTC+8 when ZoneInfo is unavailable (F4)."""
+        import datetime as _dt
+        # Setting sys.modules["zoneinfo"] = None causes ImportError on 'from zoneinfo import ...'
+        with mock.patch.dict("sys.modules", {"zoneinfo": None}):
+            tz = FR._resolve_cn_tz()
+        dt = _dt.datetime(2025, 6, 15, 12, 0, tzinfo=tz)
+        self.assertEqual(dt.utcoffset(), _dt.timedelta(hours=8),
+                         "fallback timezone must be exactly UTC+8")
+
+    # ------ F5: bare 5-digit HK code ------
+    def test_hk_bare_5digit_symbol_mapping(self):
+        """Bare 5-digit numeric symbol maps same as HK.-prefixed form (F5)."""
+        # 5-digit bare HK code must equal HK.-prefixed mapping
+        self.assertEqual(
+            FR.yahoo_symbol("07709", {}),
+            FR.yahoo_symbol("HK.07709", {}),
+            "yahoo_symbol('07709') must equal yahoo_symbol('HK.07709')",
+        )
+        # 6-digit (A-share territory like SK Hynix) must not be treated as HK
+        self.assertIsNone(
+            FR.yahoo_symbol("000660", {}),
+            "6-digit numeric must not be mapped as HK code",
+        )
+        # 3-digit must not trigger HK rule
+        self.assertIsNone(
+            FR.yahoo_symbol("700", {}),
+            "3-digit numeric must not be mapped as HK code",
+        )
+
+    # ------ F6: footer brand ------
+    def test_report_footer_edgelab_credit(self):
+        """REPORT_FOOTER must include EdgeLab brand credit (F6)."""
+        self.assertIn(
+            "杰尼马（EdgeLab）",
+            FR.REPORT_FOOTER,
+            "REPORT_FOOTER must contain '杰尼马（EdgeLab）'",
+        )
+
+    # ------ F7: empty directory guidance ------
+    def test_empty_dir_report_exits_cleanly(self):
+        """report on empty dir must exit 2 with archive guidance (F7)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as mock_err:
+                result = FR.main(["report", "--output", tmp])
+            err_text = mock_err.getvalue()
+        self.assertEqual(result, 2, "report on empty dir must exit 2")
+        self.assertIn("archive", err_text.lower(),
+                      "error message must mention 'archive'")
+
+    def test_empty_dir_market_exits_cleanly(self):
+        """market on empty dir must exit 2 mentioning both archive and prepare (F7)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as mock_err:
+                result = FR.main(["market", "--output", tmp])
+            err_text = mock_err.getvalue()
+        self.assertEqual(result, 2, "market on empty dir must exit 2")
+        self.assertIn("archive", err_text.lower(),
+                      "error message must mention 'archive'")
+        self.assertIn("prepare", err_text.lower(),
+                      "error message must mention 'prepare' (candidates.jsonl is prepare output)")
+
+    def test_empty_dir_audit_exits_cleanly(self):
+        """audit on empty dir must exit 2 with archive guidance (F7)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as mock_err:
+                result = FR.main(["audit", "--output", tmp])
+            err_text = mock_err.getvalue()
+        self.assertEqual(result, 2, "audit on empty dir must exit 2")
+        self.assertIn("archive", err_text.lower(),
+                      "error message must mention 'archive'")
 
 
 if __name__ == "__main__":
