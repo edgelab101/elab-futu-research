@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.1.1 — 2026-07-22
+
+- Fix install.sh backup pollution: backup directory now goes to
+  `~/.elab-futu-research-backups/<agent>-<timestamp>/` instead of
+  `<skills-dir>/elab-futu-research.backup.<timestamp>/`.  Previously each
+  reinstall left a sibling directory containing SKILL.md inside the skills
+  folder, causing Claude Code / Codex to load multiple ghost copies of the
+  skill.  Automatic pruning keeps at most 3 backups per agent type.  Uses
+  bash-3.2-compatible constructs; no mapfile/readarray.
+- README: add "环境要求" subsection (macOS/Linux/Windows bash, Python 3.9+,
+  no third-party deps, no API key).
+- README: add "账号安全 FAQ" section (no login, no Cookie, conservative rate
+  limiting, --since window tip, behavior on CAPTCHA/drift).
+- README: add "产出物使用边界" section (self-use OK; do not distribute full
+  archives containing others' original posts; redact identifiable info;
+  link to sample report).
+- docs/sample-report.md: new fully synthetic sample demonstrating the
+  profile.md output structure (ability matrix, market-state analysis, rule
+  cards, evidence distribution, failure log, completeness note).  All data
+  is fictional; real UIDs and real blogger content are absent.
+- VERSION bump: SKILL.md, futu_research.py, CHANGELOG.md, CURRENT.md.
+
 ## 1.1.0 — 2026-07-22
 
 - Fix repost misattribution: detect self-reposts via `feedModel.original` / `moduleData[i].data.origin`
