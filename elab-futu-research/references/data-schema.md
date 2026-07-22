@@ -19,6 +19,8 @@ Required:
   "is_repost": false,
   "title": "string",
   "text": "string",
+  "original_text": "string|null",
+  "original_author": "string|null",
   "symbols": [
     {"raw": "US.EXAMPLE", "code": "EXAMPLE", "market": "US", "name": "string|null"}
   ],
@@ -34,6 +36,8 @@ Required:
   "parse_warnings": []
 }
 ```
+
+For reposts, `text` contains the author's own comment (may be empty for silent reposts), `original_text` contains the reposted content, and `original_author` contains the original poster's name when available in the payload. Both fields are `null` for original posts.
 
 Keep raw exchange prefixes. Do not reduce `HK.00700` to `00700` or merge securities from different markets.
 

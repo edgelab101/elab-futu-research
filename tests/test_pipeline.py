@@ -84,8 +84,9 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(crawl["status"], "PASS")
             self.assertEqual(crawl["visible_history_status"], "complete_visible_history")
             posts = FR.read_jsonl(output / "archive" / "posts.jsonl")
-            self.assertEqual(len(posts), 3)
+            self.assertEqual(len(posts), 4)
             self.assertEqual(sum(bool(row["is_column"]) for row in posts), 1)
+            self.assertEqual(sum(bool(row["is_repost"]) for row in posts), 1)
             self.assertTrue(any("all" in row["stream_membership"] for row in posts))
             self.assertTrue(any("columns" in row["stream_membership"] for row in posts))
 
@@ -141,6 +142,19 @@ class PipelineTest(unittest.TestCase):
             self.assertTrue(result["publication_gate"]["data_chain_passed"])
             self.assertTrue((output / "reports" / "profile.md").exists())
             self.assertTrue((output / "qa" / "adversarial_audit.json").exists())
+            # Verify report footer credit and disclaimer are present in all report files
+            for report_name in ("profile.md", "capability_matrix.md", "rule_cards.md"):
+                report_text = (output / "reports" / report_name).read_text(encoding="utf-8")
+                self.assertIn(
+                    "elab-futu-research",
+                    report_text,
+                    msg=f"footer credit missing from {report_name}",
+                )
+                self.assertIn(
+                    "不构成任何投资建议",
+                    report_text,
+                    msg=f"disclaimer missing from {report_name}",
+                )
 
     def test_market_time_freeze(self):
         bars = self.synthetic_bars()
@@ -189,6 +203,51 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(len(bars), 2)
         self.assertEqual(bars[0]["open"], 10.0)
         self.assertEqual(bars[1]["close"], 10.2)
+
+
+    def test_repost_attribution(self):
+        """Repost posts must set is_repost=True and split own comment from original text."""
+        uid = self.fixture["uid"]
+        repost_detail = self.fixture["details"]["SYNTH-REPOST-001"]
+        with tempfile.TemporaryDirectory() as temporary:
+            detail_path = Path(temporary) / "SYNTH-REPOST-001.json"
+            detail_path.write_text(
+                json.dumps(repost_detail, ensure_ascii=False), encoding="utf-8"
+            )
+            record = FR.normalize_detail(
+                detail_path,
+                uid,
+                ["all"],
+                {},
+                f"https://q.futunn.com/profile/{uid}",
+            )
+        # Core repost flag
+        self.assertTrue(record["is_repost"], "Repost detection must set is_repost=True")
+        self.assertFalse(record["is_original_author"])
+        # Own comment is isolated in text
+        self.assertIn(
+            "虚构评论：看了一下，有参考价值。",
+            record["text"],
+            msg="Author's own comment must appear in text",
+        )
+        # Original post content in original_text, NOT in text
+        self.assertIsNotNone(record["original_text"])
+        self.assertIn(
+            "虚构官方帖",
+            record["original_text"],
+            msg="Original post text must appear in original_text",
+        )
+        self.assertNotIn(
+            "虚构官方帖",
+            record["text"],
+            msg="Original post text must NOT bleed into text field",
+        )
+        # Title uses own comment, not the original post content
+        self.assertNotIn(
+            "虚构官方帖",
+            record["title"],
+            msg="Title must not be derived from repost content",
+        )
 
 
 if __name__ == "__main__":
