@@ -21,6 +21,16 @@
 - `install.sh`: completion message now includes "更多工具：github.com/edgelab101".
 - Test suite extended with `test_repost_attribution` (is_repost, text/original_text split,
   title correctness) and report-footer assertions in the end-to-end test.
+- Fix media download silent zero-job failure: `extract_media_urls` now handles the real Futu
+  nested image structure where `orgPic`/`bigPic`/`thumbPic` values are `{url, width, height}`
+  dicts rather than bare URL strings.  Priority within each pictureItem: orgPic > bigPic;
+  thumbPic is never downloaded.  Dict-valued `display`/`preview` keys at module level now
+  also extract `.url` correctly.
+- Adversarial audit: new `media_extraction_not_zero_jobs` tripwire emits WARN when
+  `skip_media=false`, `posts>0`, and `media_objects=0` — catches future regressions silently.
+- Test suite extended with `test_media_url_extraction`: nested orgPic collected, bigPic
+  excluded when orgPic present, thumbPic never collected, bigPic fallback when orgPic absent,
+  dict-valued display key extracted.
 
 ## 1.0.0 — 2026-07-22
 

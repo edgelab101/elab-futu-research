@@ -250,5 +250,123 @@ class PipelineTest(unittest.TestCase):
         )
 
 
+    def test_media_url_extraction(self):
+        """extract_media_urls must handle nested orgPic/bigPic/thumbPic dict structure.
+
+        Before v1.1.0 the function checked isinstance(child, str) for URL_MEDIA_KEYS;
+        real Futu data wraps image URLs in {url, width, height} dicts so the old code
+        produced zero jobs silently.
+        """
+        # ------------------------------------------------------------------
+        # Case 1: full pictureItem with all three quality levels inside _original
+        #   Expected: orgPic collected; bigPic skipped (priority); thumbPic skipped always
+        # ------------------------------------------------------------------
+        detail_full = {
+            "moduleData": [
+                {
+                    "type": 1,
+                    "_original": {
+                        "stockIds": [],
+                        "orgPic": {
+                            "url": "https://img.example.com/photo-SYNTH.jpg",
+                            "width": 1062,
+                            "height": 1530,
+                        },
+                        "bigPic": {
+                            "url": "https://img.example.com/photo-SYNTH.jpg/bigversion",
+                            "width": 800,
+                            "height": 600,
+                        },
+                        "thumbPic": {
+                            "url": "https://img.example.com/photo-SYNTH.jpg/thumbversion",
+                            "width": 200,
+                            "height": 150,
+                        },
+                        "picDescription": "",
+                    },
+                }
+            ]
+        }
+        urls_full = FR.extract_media_urls(detail_full)
+        url_set_full = {item["url"] for item in urls_full}
+
+        self.assertIn(
+            "https://img.example.com/photo-SYNTH.jpg",
+            url_set_full,
+            msg="orgPic (original quality) must be collected from nested dict structure",
+        )
+        self.assertNotIn(
+            "https://img.example.com/photo-SYNTH.jpg/bigversion",
+            url_set_full,
+            msg="bigPic must be excluded when orgPic is present (priority logic)",
+        )
+        self.assertNotIn(
+            "https://img.example.com/photo-SYNTH.jpg/thumbversion",
+            url_set_full,
+            msg="thumbPic must never be collected regardless of availability",
+        )
+
+        # ------------------------------------------------------------------
+        # Case 2: bigPic fallback — orgPic absent; bigPic must be collected
+        # ------------------------------------------------------------------
+        detail_no_orgpic = {
+            "moduleData": [
+                {
+                    "type": 1,
+                    "_original": {
+                        "bigPic": {
+                            "url": "https://img.example.com/fallback-SYNTH.jpg/bigversion",
+                            "width": 800,
+                            "height": 600,
+                        },
+                        "thumbPic": {
+                            "url": "https://img.example.com/fallback-SYNTH.jpg/thumbversion",
+                            "width": 200,
+                            "height": 150,
+                        },
+                    },
+                }
+            ]
+        }
+        urls_fallback = FR.extract_media_urls(detail_no_orgpic)
+        url_set_fallback = {item["url"] for item in urls_fallback}
+
+        self.assertIn(
+            "https://img.example.com/fallback-SYNTH.jpg/bigversion",
+            url_set_fallback,
+            msg="bigPic must be collected as fallback when orgPic is absent",
+        )
+        self.assertNotIn(
+            "https://img.example.com/fallback-SYNTH.jpg/thumbversion",
+            url_set_fallback,
+            msg="thumbPic must not be collected even as last-resort fallback",
+        )
+
+        # ------------------------------------------------------------------
+        # Case 3: dict-valued display / preview keys at module level
+        #   Verifies the elif normalized in URL_MEDIA_KEYS and isinstance(child, dict) branch
+        # ------------------------------------------------------------------
+        detail_display = {
+            "moduleData": [
+                {
+                    "type": 1,
+                    "display": {
+                        "url": "https://img.example.com/display-SYNTH.jpg",
+                        "width": 392,
+                        "height": 225,
+                    },
+                }
+            ]
+        }
+        urls_display = FR.extract_media_urls(detail_display)
+        url_set_display = {item["url"] for item in urls_display}
+
+        self.assertIn(
+            "https://img.example.com/display-SYNTH.jpg",
+            url_set_display,
+            msg="dict-valued display key must be collected via .url extraction",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

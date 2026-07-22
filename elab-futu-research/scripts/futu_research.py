@@ -811,11 +811,47 @@ def like_count(detail: Dict[str, Any]) -> int:
 def extract_media_urls(detail: Dict[str, Any]) -> List[Dict[str, str]]:
     found: Dict[str, Dict[str, str]] = {}
 
+    def collect_url(url: Any, source_field: str) -> bool:
+        """Add url to found when it is a real HTTP image URL. Returns True if collected."""
+        if (
+            isinstance(url, str)
+            and url.startswith(("https://", "http://"))
+            and "spacer.gif" not in url
+        ):
+            found[url] = {"url": url, "source_field": source_field}
+            return True
+        return False
+
+    def visit_picture_item(item: Dict[str, Any]) -> None:
+        """Handle a pictureItem dict (orgPic/bigPic/thumbPic siblings) with priority.
+
+        Priority: orgPic (evidence-grade original) > bigPic (fallback).
+        thumbPic is intentionally excluded to avoid triple-downloading the same image.
+        """
+        for key in ("orgPic", "bigPic"):
+            child = item.get(key)
+            if isinstance(child, dict):
+                if collect_url(child.get("url"), key):
+                    return  # collected highest available; stop
+            elif isinstance(child, str):
+                if collect_url(child, key):
+                    return
+
     def visit(value: Any, parent_key: str = "") -> None:
         if isinstance(value, list):
             for item in value:
                 visit(item, parent_key)
         elif isinstance(value, dict):
+            # Detect pictureItem containers (sibling orgPic/bigPic/thumbPic keys) and apply
+            # priority logic instead of visiting each key independently.  This avoids
+            # downloading the same photo at three quality levels.
+            if any(k in value for k in ("orgPic", "bigPic", "thumbPic")):
+                visit_picture_item(value)
+                # Still recurse into non-picture-priority keys (e.g. stockIds, text).
+                for key, child in value.items():
+                    if key not in ("orgPic", "bigPic", "thumbPic"):
+                        visit(child, key)
+                return
             for key, child in value.items():
                 normalized = key.lower().replace("-", "").replace(" ", "")
                 if isinstance(child, str) and child.startswith(("https://", "http://")):
@@ -825,6 +861,11 @@ def extract_media_urls(detail: Dict[str, Any]) -> List[Dict[str, str]]:
                     ):
                         if "spacer.gif" not in child:
                             found[child] = {"url": child, "source_field": key}
+                elif normalized in URL_MEDIA_KEYS and isinstance(child, dict):
+                    # dict-valued media key (e.g. display, preview) — extract .url directly.
+                    # The real Futu structure wraps URL strings in {url, width, height} dicts;
+                    # the old isinstance(child, str) check silently missed these.
+                    collect_url(child.get("url"), key)
                 else:
                     visit(child, key)
 
@@ -1361,6 +1402,7 @@ def archive(args: argparse.Namespace) -> Dict[str, Any]:
         "detail_failures": detail_failures,
         "normalization_failures": normalization_failures,
         "normalized_records": len(records),
+        "skip_media": args.skip_media,
         "media_objects": len(media_by_key),
         "media_failures": media_failures,
         "notes": [
@@ -2861,6 +2903,29 @@ def audit(args: argparse.Namespace) -> Dict[str, Any]:
         "warning",
         len(media_failures),
     )
+    # Tripwire: detect the silent media-extraction failure mode where skip_media=false
+    # and posts exist but zero download jobs were produced.  This catches extraction
+    # regressions (e.g. dict-valued orgPic/bigPic structure not handled).
+    _skip_media_flag = bool(crawl.get("skip_media")) if isinstance(crawl, dict) else False
+    _media_objects = int(crawl.get("media_objects") or 0) if isinstance(crawl, dict) else 0
+    if not _skip_media_flag and len(posts) > 0 and _media_objects == 0:
+        add(
+            "media_extraction_not_zero_jobs",
+            False,
+            "warning",
+            (
+                f"skip_media=false, posts={len(posts)}, media_objects=0 — "
+                "media extraction produced zero jobs while post content exists; "
+                "possible nested-structure extraction regression"
+            ),
+        )
+    else:
+        add(
+            "media_extraction_not_zero_jobs",
+            True,
+            "info",
+            f"media_objects={_media_objects} skip_media={_skip_media_flag}",
+        )
     add(
         "reviewed_claims_available",
         bool(reviewed),
