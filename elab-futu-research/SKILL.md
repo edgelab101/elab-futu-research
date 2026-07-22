@@ -7,7 +7,7 @@ description: Archive a Futu/Moomoo public profile's visible dynamics and columns
 
 Turn one or more public Futu profile URLs into a resumable archive and an evidence-bounded research report. Make the default experience one-shot: accept the URL, choose safe defaults, run the workflow, and return the report plus audit status.
 
-Version: `1.1.0` · Last updated: `2026-07-22`
+Version: `1.1.1` · Last updated: `2026-07-22`
 
 ## Startup alignment (required)
 
