@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.1.2 — 2026-07-22
+
+Fixed:
+
+- `main()` now catches `OSError` and prints a human-readable ERROR message before exiting with code 2, instead of raising an unformatted traceback.
+- `archive`: when 0 posts are retrieved, the summary output now includes a "verify the UID" note to help diagnose invalid or private profile targets.
+- `doctor` without `--profile` now reports `status=PARTIAL` instead of failing silently or crashing.
+- `CN_TZ` initialization: added `ZoneInfo` fallback to a fixed UTC+8 offset when the timezone database is unavailable (e.g., Windows without `tzdata`). Script no longer crashes on import.
+- Bare 5-digit numeric symbols are now treated as Hong Kong market tickers (e.g., `09988` → `9988.HK`) rather than being passed through unresolved.
+- `report`, `market`, and `audit` now emit an explicit error and direct the user to run `archive` / `prepare` first when the expected input directory is empty, instead of silently producing an empty output.
+
+Changed:
+
+- `REPORT_FOOTER` attribution updated to `作者：杰尼马（EdgeLab） · 专注美港股与期权研究`.
+- Added Python 3.9 version guard at script top; `VERSION` constant updated to `1.1.2`.
+- `install.sh`: `BASH_SOURCE` reference made zsh-compatible; backup directory name uses millisecond timestamp to prevent collisions on rapid consecutive installs.
+
 ## 1.1.1 — 2026-07-22
 
 - Fix install.sh backup pollution: backup directory now goes to

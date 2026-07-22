@@ -1,3 +1,7 @@
+# Supplementary metadata for OpenAI / GPT-based runtimes.
+# Skill discovery is handled by SKILL.md, not this file.
+# Fields below are NOT part of the Codex official agent schema;
+# some runtimes may ignore this file entirely.
 interface:
   display_name: "EdgeLab 富途博主研究"
   short_description: "完整归档富途动态与专栏，并结合行情生成可审查的博主研究"
