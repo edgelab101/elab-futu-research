@@ -13,6 +13,8 @@
 
 ## 下一步
 
+- v1.2.0 待办（盲评 P2 两条）：① `_repost_original_obj` 对"非空 dict 但 richTextItems/pictureItems 均空"的边界加守卫，防真原创被误判转发；② tripwire 改用 `posts_with_images` 计数做守卫，消除纯文字博主的审计误报。
+
 - 将分支 `fix/repost-attribution-and-startup-contract` PR 合并到 main 并发布。
 - 按基线命令持续运行离线测试；后续接口漂移或规则改动通过 PR 发布。
 
