@@ -36,7 +36,7 @@ prune_backups() {
   # Delete exact paths — no glob rm -rf on $HOME.
   printf '%s\n' "$list" | head -n "$to_delete" | while IFS= read -r dir; do
     rm -rf "$dir"
-  done
+  done || true
 }
 
 install_skill() {
