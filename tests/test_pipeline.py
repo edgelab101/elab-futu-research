@@ -84,8 +84,9 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(crawl["status"], "PASS")
             self.assertEqual(crawl["visible_history_status"], "complete_visible_history")
             posts = FR.read_jsonl(output / "archive" / "posts.jsonl")
-            self.assertEqual(len(posts), 3)
+            self.assertEqual(len(posts), 4)
             self.assertEqual(sum(bool(row["is_column"]) for row in posts), 1)
+            self.assertEqual(sum(bool(row["is_repost"]) for row in posts), 1)
             self.assertTrue(any("all" in row["stream_membership"] for row in posts))
             self.assertTrue(any("columns" in row["stream_membership"] for row in posts))
 
@@ -141,6 +142,19 @@ class PipelineTest(unittest.TestCase):
             self.assertTrue(result["publication_gate"]["data_chain_passed"])
             self.assertTrue((output / "reports" / "profile.md").exists())
             self.assertTrue((output / "qa" / "adversarial_audit.json").exists())
+            # Verify report footer credit and disclaimer are present in all report files
+            for report_name in ("profile.md", "capability_matrix.md", "rule_cards.md"):
+                report_text = (output / "reports" / report_name).read_text(encoding="utf-8")
+                self.assertIn(
+                    "elab-futu-research",
+                    report_text,
+                    msg=f"footer credit missing from {report_name}",
+                )
+                self.assertIn(
+                    "不构成任何投资建议",
+                    report_text,
+                    msg=f"disclaimer missing from {report_name}",
+                )
 
     def test_market_time_freeze(self):
         bars = self.synthetic_bars()
@@ -189,6 +203,169 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(len(bars), 2)
         self.assertEqual(bars[0]["open"], 10.0)
         self.assertEqual(bars[1]["close"], 10.2)
+
+
+    def test_repost_attribution(self):
+        """Repost posts must set is_repost=True and split own comment from original text."""
+        uid = self.fixture["uid"]
+        repost_detail = self.fixture["details"]["SYNTH-REPOST-001"]
+        with tempfile.TemporaryDirectory() as temporary:
+            detail_path = Path(temporary) / "SYNTH-REPOST-001.json"
+            detail_path.write_text(
+                json.dumps(repost_detail, ensure_ascii=False), encoding="utf-8"
+            )
+            record = FR.normalize_detail(
+                detail_path,
+                uid,
+                ["all"],
+                {},
+                f"https://q.futunn.com/profile/{uid}",
+            )
+        # Core repost flag
+        self.assertTrue(record["is_repost"], "Repost detection must set is_repost=True")
+        self.assertFalse(record["is_original_author"])
+        # Own comment is isolated in text
+        self.assertIn(
+            "虚构评论：看了一下，有参考价值。",
+            record["text"],
+            msg="Author's own comment must appear in text",
+        )
+        # Original post content in original_text, NOT in text
+        self.assertIsNotNone(record["original_text"])
+        self.assertIn(
+            "虚构官方帖",
+            record["original_text"],
+            msg="Original post text must appear in original_text",
+        )
+        self.assertNotIn(
+            "虚构官方帖",
+            record["text"],
+            msg="Original post text must NOT bleed into text field",
+        )
+        # Title uses own comment, not the original post content
+        self.assertNotIn(
+            "虚构官方帖",
+            record["title"],
+            msg="Title must not be derived from repost content",
+        )
+
+
+    def test_media_url_extraction(self):
+        """extract_media_urls must handle nested orgPic/bigPic/thumbPic dict structure.
+
+        Before v1.1.0 the function checked isinstance(child, str) for URL_MEDIA_KEYS;
+        real Futu data wraps image URLs in {url, width, height} dicts so the old code
+        produced zero jobs silently.
+        """
+        # ------------------------------------------------------------------
+        # Case 1: full pictureItem with all three quality levels inside _original
+        #   Expected: orgPic collected; bigPic skipped (priority); thumbPic skipped always
+        # ------------------------------------------------------------------
+        detail_full = {
+            "moduleData": [
+                {
+                    "type": 1,
+                    "_original": {
+                        "stockIds": [],
+                        "orgPic": {
+                            "url": "https://img.example.com/photo-SYNTH.jpg",
+                            "width": 1062,
+                            "height": 1530,
+                        },
+                        "bigPic": {
+                            "url": "https://img.example.com/photo-SYNTH.jpg/bigversion",
+                            "width": 800,
+                            "height": 600,
+                        },
+                        "thumbPic": {
+                            "url": "https://img.example.com/photo-SYNTH.jpg/thumbversion",
+                            "width": 200,
+                            "height": 150,
+                        },
+                        "picDescription": "",
+                    },
+                }
+            ]
+        }
+        urls_full = FR.extract_media_urls(detail_full)
+        url_set_full = {item["url"] for item in urls_full}
+
+        self.assertIn(
+            "https://img.example.com/photo-SYNTH.jpg",
+            url_set_full,
+            msg="orgPic (original quality) must be collected from nested dict structure",
+        )
+        self.assertNotIn(
+            "https://img.example.com/photo-SYNTH.jpg/bigversion",
+            url_set_full,
+            msg="bigPic must be excluded when orgPic is present (priority logic)",
+        )
+        self.assertNotIn(
+            "https://img.example.com/photo-SYNTH.jpg/thumbversion",
+            url_set_full,
+            msg="thumbPic must never be collected regardless of availability",
+        )
+
+        # ------------------------------------------------------------------
+        # Case 2: bigPic fallback — orgPic absent; bigPic must be collected
+        # ------------------------------------------------------------------
+        detail_no_orgpic = {
+            "moduleData": [
+                {
+                    "type": 1,
+                    "_original": {
+                        "bigPic": {
+                            "url": "https://img.example.com/fallback-SYNTH.jpg/bigversion",
+                            "width": 800,
+                            "height": 600,
+                        },
+                        "thumbPic": {
+                            "url": "https://img.example.com/fallback-SYNTH.jpg/thumbversion",
+                            "width": 200,
+                            "height": 150,
+                        },
+                    },
+                }
+            ]
+        }
+        urls_fallback = FR.extract_media_urls(detail_no_orgpic)
+        url_set_fallback = {item["url"] for item in urls_fallback}
+
+        self.assertIn(
+            "https://img.example.com/fallback-SYNTH.jpg/bigversion",
+            url_set_fallback,
+            msg="bigPic must be collected as fallback when orgPic is absent",
+        )
+        self.assertNotIn(
+            "https://img.example.com/fallback-SYNTH.jpg/thumbversion",
+            url_set_fallback,
+            msg="thumbPic must not be collected even as last-resort fallback",
+        )
+
+        # ------------------------------------------------------------------
+        # Case 3: dict-valued display / preview keys at module level
+        #   Verifies the elif normalized in URL_MEDIA_KEYS and isinstance(child, dict) branch
+        # ------------------------------------------------------------------
+        detail_display = {
+            "moduleData": [
+                {
+                    "type": 1,
+                    "display": {
+                        "url": "https://img.example.com/display-SYNTH.jpg",
+                        "width": 392,
+                        "height": 225,
+                    },
+                }
+            ]
+        }
+        urls_display = FR.extract_media_urls(detail_display)
+        url_set_display = {item["url"] for item in urls_display}
+
+        self.assertIn(
+            "https://img.example.com/display-SYNTH.jpg",
+            url_set_display,
+            msg="dict-valued display key must be collected via .url extraction",
+        )
 
 
 if __name__ == "__main__":

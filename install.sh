@@ -40,3 +40,4 @@ case "${1:-all}" in
 esac
 
 echo "完成。重新打开 Codex/Claude Code 后即可调用 elab-futu-research。"
+echo "更多工具：github.com/edgelab101"

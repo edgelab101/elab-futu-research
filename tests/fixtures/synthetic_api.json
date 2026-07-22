@@ -10,6 +10,12 @@
             "feed_id": "SYNTH-POST-001",
             "timestamp": 1746748800
           }
+        },
+        {
+          "feed_comm": {
+            "feed_id": "SYNTH-REPOST-001",
+            "timestamp": 1746835200
+          }
         }
       ],
       "has_more": 1,
@@ -156,6 +162,77 @@
             "browse": 80,
             "comment": 4,
             "share": 2
+          }
+        }
+      }
+    },
+    "SYNTH-REPOST-001": {
+      "code": 0,
+      "data": {
+        "data": {
+          "feedCommon": {
+            "feedId": "SYNTH-REPOST-001",
+            "timestamp": 1746835200,
+            "feedType": 3,
+            "dynamicDescription": {
+              "stringSc": "分享了",
+              "stringEn": "shared"
+            }
+          },
+          "feedTitle": "",
+          "authorInfo": {
+            "userId": "00000000000000000000",
+            "nickName": "虚构研究员甲"
+          },
+          "feedModel": {
+            "original": {
+              "richTextItems": [
+                {
+                  "type": 0,
+                  "text": "虚构官方帖：2026年上半年复盘总结"
+                }
+              ],
+              "pictureItems": [],
+              "url": "https://q.futunn.com/feed/SYNTH-ORIG-999",
+              "scheme": "futunn://nncircle/feed/SYNTH-ORIG-999",
+              "originalType": 0
+            }
+          },
+          "moduleData": [
+            {
+              "type": 0,
+              "data": [
+                {
+                  "type": 0,
+                  "attrs": {},
+                  "text": "虚构评论：看了一下，有参考价值。"
+                }
+              ]
+            },
+            {
+              "type": 2,
+              "data": {
+                "type": 0,
+                "url": "https://q.futunn.com/feed/SYNTH-ORIG-999",
+                "scheme": "futunn://nncircle/feed/SYNTH-ORIG-999",
+                "origin": {
+                  "richTextItems": [
+                    {
+                      "type": 0,
+                      "text": "虚构官方帖：2026年上半年复盘总结"
+                    }
+                  ],
+                  "pictureItems": [],
+                  "url": "https://q.futunn.com/feed/SYNTH-ORIG-999",
+                  "originalType": 0
+                }
+              }
+            }
+          ],
+          "count": {
+            "browse": 55,
+            "comment": 0,
+            "share": 0
           }
         }
       }

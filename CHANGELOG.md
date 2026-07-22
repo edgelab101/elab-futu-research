@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.1.0 — 2026-07-22
+
+- Fix repost misattribution: detect self-reposts via `feedModel.original` / `moduleData[i].data.origin`
+  rather than author-UID comparison, which always matched for self-reposts.
+- Split repost text: author's own comment goes to `text`; reposted content goes to new
+  `original_text` field; original poster name (when present) goes to new `original_author` field.
+- Fix title generation for reposts: uses own comment first, then `转发：<original preview>`,
+  eliminating the duplicate-concatenation artifact.
+- Update `references/data-schema.md` with `original_text` and `original_author` fields.
+- Monthly Markdown now shows repost source line "原创：否；转自：<author>" and renders
+  original content as a blockquote below the author's own comment.
+- Startup alignment contract: `SKILL.md` now requires aligning on research target,
+  time range, deliverables, and other constraints before any capture, with a one-line
+  parameter summary echo ending in "elab-futu-research by 杰尼马（EdgeLab）".
+- Report footer credit added to all three report files (`profile.md`, `capability_matrix.md`,
+  `rule_cards.md`): attribution, social handles, and "本报告仅供研究参考，不构成任何投资建议。"
+- README: brand line "by 杰尼马 · EdgeLab：给散户的可审计投研工具箱" added below title;
+  alignment step description added to the 最省事的用法 section.
+- `install.sh`: completion message now includes "更多工具：github.com/edgelab101".
+- Test suite extended with `test_repost_attribution` (is_repost, text/original_text split,
+  title correctness) and report-footer assertions in the end-to-end test.
+- Fix media download silent zero-job failure: `extract_media_urls` now handles the real Futu
+  nested image structure where `orgPic`/`bigPic`/`thumbPic` values are `{url, width, height}`
+  dicts rather than bare URL strings.  Priority within each pictureItem: orgPic > bigPic;
+  thumbPic is never downloaded.  Dict-valued `display`/`preview` keys at module level now
+  also extract `.url` correctly.
+- Adversarial audit: new `media_extraction_not_zero_jobs` tripwire emits WARN when
+  `skip_media=false`, `posts>0`, and `media_objects=0` — catches future regressions silently.
+- Test suite extended with `test_media_url_extraction`: nested orgPic collected, bigPic
+  excluded when orgPic present, thumbPic never collected, bigPic fallback when orgPic absent,
+  dict-valued display key extracted.
+
 ## 1.0.0 — 2026-07-22
 
 - Initial public Skill for Codex and Claude Code.

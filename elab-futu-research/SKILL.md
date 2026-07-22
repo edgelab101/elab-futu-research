@@ -7,7 +7,24 @@ description: Archive a Futu/Moomoo public profile's visible dynamics and columns
 
 Turn one or more public Futu profile URLs into a resumable archive and an evidence-bounded research report. Make the default experience one-shot: accept the URL, choose safe defaults, run the workflow, and return the report plus audit status.
 
-Version: `1.0.0` · Last updated: `2026-07-22`
+Version: `1.1.0` · Last updated: `2026-07-22`
+
+## Startup alignment (required)
+
+Before running any capture or producing any deliverable, align on the following four items. If the user's initial message already answers an item, **do not re-ask it** — simply acknowledge it in the summary line below.
+
+Collect only what is still missing, in **one message** (not one question per item):
+
+1. **Research target** — which Futu profile URL(s) or numeric UID(s)?
+2. **Time range** — default is all publicly visible history; echo this back explicitly even when the user did not specify ("全量历史" or the explicit window they gave).
+3. **Deliverables** — one or more of: ① 完整归档 ② 研究报告 ③ 多博主对比 ④ 规则卡 (multiple allowed).
+4. **Other constraints** — skip media, custom output directory, redaction needs, or anything else that changes the run.
+
+Once all four items are known, reply with **one summary line** before issuing any command:
+
+> 博主 \<X\> · 范围 \<Y\> · 交付 \<Z\> · 输出目录 \<W\> · elab-futu-research by 杰尼马（EdgeLab）
+
+Then proceed with the workflow.
 
 ## Default behavior
 
@@ -21,7 +38,7 @@ Version: `1.0.0` · Last updated: `2026-07-22`
 - Write to `./futu-research-output/` unless the user names another directory.
 - Resume safely from cached pages/details/media. Never delete raw evidence; rebuild derived files atomically.
 - Use conservative request rates. Stop and report interface drift, login, CAPTCHA, or access denial; do not bypass access controls.
-- Do not ask setup questions unless a missing choice materially changes the result.
+- Follow the **Startup alignment** section above before starting any capture.
 
 ## Fast path
 
