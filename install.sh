@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 SOURCE="$ROOT/elab-futu-research"
 
 if [[ ! -f "$SOURCE/SKILL.md" ]]; then
@@ -48,7 +48,7 @@ install_skill() {
   cp -R "$SOURCE" "$target.tmp"
   if [[ -d "$target" ]]; then
     local ts
-    ts="$(date +%Y%m%d%H%M%S)"
+    ts="$(date +%Y%m%d%H%M%S)-$$"
     local backup_dir="$BACKUP_BASE/${agent_label}-${ts}"
     mkdir -p "$BACKUP_BASE"
     mv "$target" "$backup_dir"
