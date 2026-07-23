@@ -2,16 +2,14 @@
 
 ## 做到哪了
 
-- `elab-futu-research` 1.3.0 已完成，分支 `feat/v1.3.0-tiger-adapter`。
-- 多平台 adapter 架构：`CaptureAdapter` 基类 + 域名 dispatcher 自动路由。
+- `elab-futu-research` 1.3.1 已完成，分支 `feat/v1.3.1-explicit-timerange-startup`。
+- 启动契约显式化：时间范围改为必须明确选择（不再静默默认全量历史）；新增探量给预期必做步骤；研究目标 URL 须用户明确提供。
+- 跨模型可用性加固：脚本定位探测命令、未知环境路径兜底、audit FAIL 停止交付、跨步 output 目录说明、claims.reviewed.jsonl schema 字段指引、MFE/MAE 全称 + 参考文档。
+- 上一版（1.3.0）多平台 adapter 架构：`CaptureAdapter` 基类 + 域名 dispatcher 自动路由。
   - `FutuAdapter`：原有 JSON 接口抓取（不变）。
   - `TigerAdapter`：纯标准库 HTML 解析 laohu8.com，提取帖文、时间戳、互动数、`$Name(CODE)$` 股票符号。
   - 老虎用法：`--profile "https://www.laohu8.com/personal/<uid>/"`，下游 prepare/market/report/export 全复用。
-- 审计按 adapter 声明的 `expected_streams` 判流，不再硬编双流；老虎单流（dynamics only）可通过完整性检查。
-- 月度 Markdown 标题和报告头部改为平台中性措辞。
-- `export-authors` 主页链接改用归档条目内记录的平台 URL，不再硬编富途 URL 格式。
-- 老虎路由只认 laohu8.com URL；纯数字 UID 仍归富途（两平台 UID 格式相同，无法区分）。
-- 版本号已更新：SKILL.md / CHANGELOG.md / CURRENT.md / README.md / docs/sample-report.md。
+- 版本号已更新：SKILL.md / CHANGELOG.md / CURRENT.md / README.md / docs/sample-report.md / futu_research.py / tests/test_pipeline.py。
 
 ## Backlog
 

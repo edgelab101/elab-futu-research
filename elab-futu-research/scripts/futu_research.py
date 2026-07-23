@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 SCHEMA_VERSION = "1.0"
 LIST_URL = "https://q.futunn.com/nnq/personal-list"
 REPORT_FOOTER = (

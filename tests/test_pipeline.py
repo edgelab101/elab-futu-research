@@ -376,8 +376,8 @@ class PipelineTest(unittest.TestCase):
 
     # ------ F5: version ------
     def test_version_string(self):
-        """VERSION constant must be bumped to 1.3.0 (TigerAdapter release)."""
-        self.assertEqual(FR.VERSION, "1.3.0")
+        """VERSION constant must be bumped to 1.3.1 (explicit time range startup)."""
+        self.assertEqual(FR.VERSION, "1.3.1")
 
     # ------ F1: OSError in main exits 2 cleanly ------
     def test_output_file_path_exits_cleanly(self):

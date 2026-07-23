@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.3.1 — 2026-07-23
+
+Changed:
+
+- Startup alignment: time range is now a required explicit choice (no silent default to full history). The agent presents four options (近半年 / 近 1 年 / 近 18 个月 / 全量历史) and waits for the user to select one; full-history capture requires explicit user confirmation and a warning about high-volume bloggers (hours of run time, hundreds of MB).
+- Startup alignment: item 1 (Research target) now requires asking the user for a URL if not provided; substituting example UIDs is prohibited.
+- `run` is now the explicit default mode; step-by-step mode is reserved for users who require strict no-time-travel (no outcome data visible before claims are frozen).
+- Summary line requirement: \<Y\> must reflect the user-confirmed window, not "全量历史" without explicit confirmation.
+
+Added:
+
+- Startup alignment item 3 (探量给预期): mandatory volume probe (`doctor --profile`) before any full-history or unknown-volume capture; agent reports a concrete estimate (N posts, ~X hours/MB) and waits for the user to confirm the window.
+- Fast path: "Other / unknown" environment row added to the installation path table.
+- Fast path: auto-detect command for agents unsure of the installation path.
+- Fast path: note that all `references/` paths are relative to the skill installation directory, not `--output`.
+- Workflow preamble: note that all steps use the same `<dir>` for the entire session.
+- Step 3 (Review): explicit schema pointer (Reviewed claim section in `references/data-schema.md`) and required field list (`claim_id`, `feed_id`, `evidence_level`, `evidence_span`, `direction`, `published_at`, `reviewer`, `reviewed_at`).
+- Step 4 (Market): MFE and MAE expanded to full names with direction-aware note and reference.
+- Step 5 (Reports): audit gate — `status=FAIL` in `qa/adversarial_audit.json` blocks delivery of final conclusions; `status=WARN` requires gap annotations in the report.
+- `agents/openai.yaml`: comment block reminding runtimes to complete Startup alignment before any capture.
+
 ## 1.3.0 — 2026-07-23
 
 Added:
