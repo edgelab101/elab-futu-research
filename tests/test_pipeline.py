@@ -369,10 +369,10 @@ class PipelineTest(unittest.TestCase):
         )
 
 
-    # ------ F9: version ------
+    # ------ F5: version ------
     def test_version_string(self):
-        """VERSION constant must be bumped to 1.1.2 (F9)."""
-        self.assertEqual(FR.VERSION, "1.1.2")
+        """VERSION constant must be bumped to 1.2.0 (F5)."""
+        self.assertEqual(FR.VERSION, "1.2.0")
 
     # ------ F1: OSError in main exits 2 cleanly ------
     def test_output_file_path_exits_cleanly(self):
@@ -510,6 +510,631 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(result, 2, "audit on empty dir must exit 2")
         self.assertIn("archive", err_text.lower(),
                       "error message must mention 'archive'")
+
+
+    # ------ F1: evidence media mode ------
+
+    def _make_detail(self, feed_id, text, has_image=False, is_repost=False):
+        """Helper: build a minimal synthetic detail envelope."""
+        module_data_entry: dict = {"data": {"text": text}}
+        if has_image:
+            module_data_entry["data"]["orgPic"] = {
+                "url": f"https://img.example.com/{feed_id}.jpg",
+                "width": 800,
+                "height": 600,
+            }
+        detail: dict = {
+            "feedCommon": {
+                "feedId": feed_id,
+                "timestamp": 1746748800,
+                "feedType": 3,
+            },
+            "feedTitle": "",
+            "authorInfo": {"userId": "99999", "nickName": "Test"},
+            "moduleData": [module_data_entry],
+            "count": {"browse": 1, "comment": 0, "share": 0},
+        }
+        if is_repost:
+            detail["feedModel"] = {
+                "original": {
+                    "richTextItems": [{"type": 0, "text": "Original content"}],
+                    "pictureItems": [],
+                }
+            }
+        return {"code": 0, "data": {"data": detail}}
+
+    def test_media_evidence_mode_keyword_match(self):
+        """evidence mode: post with evidence keyword gets media job; without keyword gets skip record."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            uid = "99999"
+            detail_dir = output / "raw" / "details" / uid
+            detail_dir.mkdir(parents=True, exist_ok=True)
+
+            # Post WITH evidence keyword and image
+            env1 = self._make_detail("EVID-001", "今天订单成交，买入了$AAPL$。", has_image=True)
+            (detail_dir / "EVID-001.json").write_text(json.dumps(env1), encoding="utf-8")
+
+            # Post WITHOUT evidence keyword but has image
+            env2 = self._make_detail("EVID-002", "市场行情一般，继续观望。", has_image=True)
+            (detail_dir / "EVID-002.json").write_text(json.dumps(env2), encoding="utf-8")
+
+            paths = [detail_dir / "EVID-001.json", detail_dir / "EVID-002.json"]
+
+            with mock.patch.object(
+                FR, "request_bytes",
+                return_value=(b"\xff\xd8\xff" + b"\x00" * 100, {"content_type": "image/jpeg"}),
+            ):
+                results = FR.download_media(uid, paths, output, workers=1, media_mode="evidence")
+
+        ok_records = [r for r in results if r.get("feed_id") == "EVID-001" and r.get("status") == "ok"]
+        skip_records = [r for r in results if r.get("feed_id") == "EVID-002" and r.get("status") == "skipped"]
+
+        self.assertTrue(len(ok_records) > 0, "post with evidence keyword must have ok download record")
+        self.assertTrue(len(skip_records) > 0, "post without evidence keyword must have skip record")
+        self.assertIn("mode=evidence", skip_records[0].get("skip_reason", ""),
+                      "skip_reason must indicate evidence mode")
+        self.assertIn("matched=False", skip_records[0].get("skip_reason", ""))
+
+    def test_media_evidence_mode_repost_skipped(self):
+        """evidence mode: repost posts are always skipped even if text matches keywords."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            uid = "99999"
+            detail_dir = output / "raw" / "details" / uid
+            detail_dir.mkdir(parents=True, exist_ok=True)
+
+            # Repost WITH evidence keyword
+            env = self._make_detail("EVID-RPOST", "订单成交，看这个转发。", has_image=True, is_repost=True)
+            (detail_dir / "EVID-RPOST.json").write_text(json.dumps(env), encoding="utf-8")
+
+            results = FR.download_media(uid, [detail_dir / "EVID-RPOST.json"], output, workers=1, media_mode="evidence")
+
+        skip_records = [r for r in results if r.get("status") == "skipped"]
+        self.assertTrue(len(skip_records) > 0, "repost must be skipped in evidence mode")
+        self.assertIn("is_repost", skip_records[0].get("skip_reason", ""))
+
+    def test_skip_media_alias_equals_none(self):
+        """--skip-media backward-compat: resolves to media_mode='none' in archive."""
+        uid = self.fixture["uid"]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            archive_args = argparse.Namespace(
+                profile=[uid],
+                since=None,
+                until=None,
+                output=str(output),
+                skip_media=True,   # old alias
+                # no 'media' attribute → getattr default 'all' → alias kicks in
+                detail_workers=2,
+                media_workers=2,
+                max_pages=20,
+                refresh=False,
+            )
+            with mock.patch.object(FR, "request_json", side_effect=self.fake_request_json):
+                crawl = FR.archive(archive_args)
+        self.assertEqual(crawl.get("media_mode"), "none",
+                         "--skip-media alias must resolve media_mode to 'none'")
+        self.assertTrue(crawl.get("skip_media"),
+                        "backward-compat skip_media field must be True when mode is none")
+
+    def test_media_mode_explicit_none(self):
+        """--media=none must set media_mode='none' in crawl audit."""
+        uid = self.fixture["uid"]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            archive_args = argparse.Namespace(
+                profile=[uid],
+                since=None,
+                until=None,
+                output=str(output),
+                skip_media=False,
+                media="none",
+                detail_workers=2,
+                media_workers=2,
+                max_pages=20,
+                refresh=False,
+            )
+            with mock.patch.object(FR, "request_json", side_effect=self.fake_request_json):
+                crawl = FR.archive(archive_args)
+        self.assertEqual(crawl.get("media_mode"), "none")
+
+    # ------ F2: self-repost dedup and cross-blogger same-post ------
+
+    def test_cross_blogger_same_feed_not_deduped(self):
+        """Two bloggers having a post with the same feed_id must produce two separate records.
+
+        The index key is (uid, feed_id) so different uids are different keys.
+        This test walks the full archive() path — no algorithm copied into the test body.
+        """
+        uid_a = "22222222222222222222"  # must be numeric for parse_uid
+        uid_b = "33333333333333333333"
+        shared_feed_id = "CROSS-FEED-001"
+
+        def fake_rj_cross(url, params=None, attempts=4):
+            params = params or {}
+            if url == FR.LIST_URL:
+                stream_type = int(params.get("type", 0))
+                load_type = int(params.get("load_list_type", 1))
+                # Only return the shared feed in "all" stream (type 301), not in "columns" (302).
+                # This ensures each uid sees the feed in exactly one stream → self_repost=False.
+                if load_type == 2 and stream_type == 301:
+                    return {
+                        "result": 0,
+                        "feed": [{"feed_comm": {"feed_id": shared_feed_id, "timestamp": 1746748800}}],
+                        "has_more": 0, "more_mark": "", "sequence": "",
+                    }
+                return {"result": 0, "feed": [], "has_more": 0, "more_mark": "", "sequence": ""}
+            if url == FR.DETAIL_URL:
+                # Return a post attributed to the blogger whose uid is in the target_uid param
+                # (Futu returns author info in authorInfo)
+                target = str(params.get("feedId") or "")
+                return {
+                    "code": 0,
+                    "data": {"data": {
+                        "feedCommon": {"feedId": shared_feed_id, "timestamp": 1746748800, "feedType": 3,
+                                       "dynamicDescription": {"stringSc": "发表了"}},
+                        "feedTitle": "Cross-blogger post",
+                        "authorInfo": {"userId": "SOME-AUTHOR", "nickName": "Author"},
+                        "moduleData": [{"data": {"text": "Content."}}],
+                        "count": {"browse": 1, "comment": 0, "share": 0},
+                    }}
+                }
+            return {"code": 0}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_args = argparse.Namespace(
+                profile=[uid_a, uid_b], since=None, until=None, output=tmp,
+                skip_media=True, detail_workers=2, media_workers=2,
+                max_pages=20, refresh=False,
+            )
+            with mock.patch.object(FR, "request_json", side_effect=fake_rj_cross):
+                FR.archive(archive_args)
+            posts = FR.read_jsonl(Path(tmp) / "archive" / "posts.jsonl")
+
+        # Two different uids with same feed_id → two different index keys → two records
+        records_with_feed = [p for p in posts if p.get("feed_id") == shared_feed_id]
+        self.assertEqual(len(records_with_feed), 2,
+                         "different uids with same feed_id must produce two separate records")
+        # self_reposted machinery was removed in v1.2.0; the field must not reappear
+        for rec in records_with_feed:
+            self.assertNotIn("self_reposted", rec,
+                             "self_reposted field was removed and must not reappear in archive output")
+
+    def test_audit_uniqueness_cross_blogger_passes(self):
+        """Audit normalized_feed_ids_unique must PASS for two bloggers sharing a feed_id.
+
+        The audit checks (profile_uid, feed_id) pairs, not bare feed_ids.
+        This test runs the full audit() path against a crafted posts.jsonl.
+        """
+        uid_a = "44444444444444444444"  # numeric for parse_uid (audit reads posts.jsonl directly)
+        uid_b = "55555555555555555555"
+        shared_feed_id = "AUD-CROSS-001"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            # Create minimal crawl_audit.json that audit() needs
+            crawl_audit = {
+                "schema_version": "1.0",
+                "status": "PASS",
+                "visible_history_status": "complete_visible_history",
+                "captured_at": "2026-07-23T00:00:00+00:00",
+                "requested_since": None,
+                "requested_until": None,
+                "profiles": [
+                    {"uid": uid_a, "profile_url": f"https://q.futunn.com/profile/{uid_a}"},
+                    {"uid": uid_b, "profile_url": f"https://q.futunn.com/profile/{uid_b}"},
+                ],
+                "streams": [
+                    {"profile_uid": uid_a, "stream": "all", "complete_for_request": True,
+                     "terminal_reason": "has_more_zero"},
+                    {"profile_uid": uid_a, "stream": "columns", "complete_for_request": True,
+                     "terminal_reason": "has_more_zero"},
+                    {"profile_uid": uid_b, "stream": "all", "complete_for_request": True,
+                     "terminal_reason": "has_more_zero"},
+                    {"profile_uid": uid_b, "stream": "columns", "complete_for_request": True,
+                     "terminal_reason": "has_more_zero"},
+                ],
+                "detail_expected": 2,
+                "detail_successes": 2,
+                "detail_failures": [],
+                "normalization_failures": [],
+                "normalized_records": 2,
+                "media_mode": "none",
+                "skip_media": True,
+                "posts_with_image_content": 0,
+                "media_objects": 0,
+                "media_failures": [],
+                "notes": [],
+            }
+            (output / "qa").mkdir(parents=True, exist_ok=True)
+            FR.atomic_write_json(output / "qa" / "crawl_audit.json", crawl_audit)
+
+            # Two records with same feed_id but different profile_uid (cross-blogger)
+            (output / "archive").mkdir(parents=True, exist_ok=True)
+            for uid in (uid_a, uid_b):
+                detail_dir = output / "raw" / "details" / uid
+                detail_dir.mkdir(parents=True, exist_ok=True)
+                detail_path = detail_dir / f"{shared_feed_id}.json"
+                detail_path.write_text(
+                    json.dumps({"code": 0, "data": {"data": {
+                        "feedCommon": {"feedId": shared_feed_id}
+                    }}}),
+                    encoding="utf-8",
+                )
+            FR.write_jsonl(output / "archive" / "posts.jsonl", [
+                {
+                    "profile_uid": uid_a, "feed_id": shared_feed_id,
+                    "is_repost": False, "stream_membership": ["all"],
+                    "source": {"detail_path": str(
+                        output / "raw" / "details" / uid_a / f"{shared_feed_id}.json"
+                    )},
+                },
+                {
+                    "profile_uid": uid_b, "feed_id": shared_feed_id,
+                    "is_repost": False, "stream_membership": ["all"],
+                    "source": {"detail_path": str(
+                        output / "raw" / "details" / uid_b / f"{shared_feed_id}.json"
+                    )},
+                },
+            ])
+
+            result = FR.audit(argparse.Namespace(output=str(output)))
+
+        uniqueness_check = next(
+            (c for c in result["checks"] if c["name"] == "normalized_feed_ids_unique"), None
+        )
+        self.assertIsNotNone(uniqueness_check)
+        self.assertTrue(
+            uniqueness_check["passed"],
+            "cross-blogger same feed_id must PASS uniqueness check "
+            "(audit uses (profile_uid, feed_id) pairs)",
+        )
+
+    def test_empty_origin_shell_not_repost(self):
+        """Origin dict with empty richTextItems and pictureItems must not classify post as repost."""
+        empty_origin = {"richTextItems": [], "pictureItems": [], "url": "https://example.com"}
+        self.assertFalse(
+            FR._has_repost_content(empty_origin),
+            "empty richTextItems+pictureItems must not be treated as repost content",
+        )
+        non_empty_origin = {"richTextItems": [{"text": "hello"}], "pictureItems": []}
+        self.assertTrue(
+            FR._has_repost_content(non_empty_origin),
+            "non-empty richTextItems must be treated as repost content",
+        )
+
+    def test_skip_media_and_media_evidence_both_given_warns_stderr(self):
+        """When --skip-media and --media=evidence are both given, --media wins and a warning is printed.
+
+        Reviewer optional #3: verify the stderr warning path is exercised.
+        """
+        uid = self.fixture["uid"]
+
+        def fake_rj(url, params=None, attempts=4):
+            params = params or {}
+            if url == FR.LIST_URL:
+                load_type = int(params.get("load_list_type", 1))
+                if load_type == 2:
+                    return {
+                        "result": 0, "feed": [], "has_more": 0,
+                        "more_mark": "", "sequence": "",
+                    }
+                return {"result": 0, "feed": [], "has_more": 0, "more_mark": "", "sequence": ""}
+            return {"code": 0}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_args = argparse.Namespace(
+                profile=[uid], since=None, until=None, output=tmp,
+                skip_media=True,   # backward-compat alias
+                media="evidence",  # explicit --media wins
+                detail_workers=2, media_workers=2,
+                max_pages=20, refresh=False,
+            )
+            import sys
+            stderr_capture = io.StringIO()
+            with mock.patch.object(FR, "request_json", side_effect=fake_rj):
+                with mock.patch("sys.stderr", stderr_capture):
+                    crawl = FR.archive(archive_args)
+
+        warning_text = stderr_capture.getvalue()
+        self.assertIn("--skip-media", warning_text,
+                      "stderr must mention --skip-media")
+        self.assertIn("evidence", warning_text,
+                      "stderr must mention the winning --media=evidence value")
+        # --media wins: effective mode must be 'evidence', not 'none'
+        self.assertEqual(crawl.get("media_mode"), "evidence",
+                         "--media=evidence must win over --skip-media alias")
+
+    # ------ F3: tripwire uses posts_with_image_content ------
+
+    def test_tripwire_pure_text_blogger_no_false_alarm(self):
+        """Tripwire must NOT fire when posts_with_image_content=0 (pure-text archive)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            uid = self.fixture["uid"]
+            # Crawl audit simulates a pure-text blogger run
+            crawl_audit = {
+                "schema_version": "1.0",
+                "status": "PASS",
+                "visible_history_status": "complete_visible_history",
+                "captured_at": "2026-07-22T00:00:00+00:00",
+                "requested_since": None,
+                "requested_until": None,
+                "profiles": [{"uid": uid, "profile_url": f"https://q.futunn.com/profile/{uid}"}],
+                "streams": [
+                    {"profile_uid": uid, "stream": "all", "complete_for_request": True,
+                     "terminal_reason": "has_more_zero"},
+                    {"profile_uid": uid, "stream": "columns", "complete_for_request": True,
+                     "terminal_reason": "has_more_zero"},
+                ],
+                "detail_expected": 1,
+                "detail_successes": 1,
+                "detail_failures": [],
+                "normalization_failures": [],
+                "normalized_records": 1,
+                "media_mode": "all",
+                "skip_media": False,
+                "posts_with_image_content": 0,  # <-- pure-text blogger
+                "media_objects": 0,  # no media downloaded (no images to get)
+                "media_failures": [],
+                "notes": [],
+            }
+            (output / "qa").mkdir(parents=True, exist_ok=True)
+            FR.atomic_write_json(output / "qa" / "crawl_audit.json", crawl_audit)
+            # Also need a posts.jsonl for audit to read
+            (output / "archive").mkdir(parents=True, exist_ok=True)
+            FR.write_jsonl(output / "archive" / "posts.jsonl", [{
+                "feed_id": "TEXT-001",
+                "profile_uid": uid,
+                "source": {"detail_path": str(output / "raw" / "details" / uid / "TEXT-001.json")},
+            }])
+            # Create dummy detail file so source trace check passes
+            detail_dir = output / "raw" / "details" / uid
+            detail_dir.mkdir(parents=True, exist_ok=True)
+            (detail_dir / "TEXT-001.json").write_text(
+                json.dumps({"code": 0, "data": {"data": {"feedCommon": {"feedId": "TEXT-001"}}}}),
+                encoding="utf-8",
+            )
+            result = FR.audit(argparse.Namespace(output=str(output)))
+
+        tripwire_check = next(
+            (c for c in result["checks"] if c["name"] == "media_extraction_not_zero_jobs"), None
+        )
+        self.assertIsNotNone(tripwire_check)
+        self.assertTrue(
+            tripwire_check["passed"],
+            "tripwire must PASS for pure-text archive (posts_with_image_content=0)",
+        )
+        self.assertIn("N/A", str(tripwire_check.get("detail", "")),
+                      "tripwire detail must say N/A for zero-image archive")
+
+    def test_tripwire_image_posts_zero_downloads_fires(self):
+        """Tripwire must WARN when posts_with_image_content > 0 but media_objects=0."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            uid = self.fixture["uid"]
+            crawl_audit = {
+                "schema_version": "1.0",
+                "status": "PASS",
+                "visible_history_status": "complete_visible_history",
+                "captured_at": "2026-07-22T00:00:00+00:00",
+                "requested_since": None,
+                "requested_until": None,
+                "profiles": [{"uid": uid, "profile_url": f"https://q.futunn.com/profile/{uid}"}],
+                "streams": [
+                    {"profile_uid": uid, "stream": "all", "complete_for_request": True,
+                     "terminal_reason": "has_more_zero"},
+                    {"profile_uid": uid, "stream": "columns", "complete_for_request": True,
+                     "terminal_reason": "has_more_zero"},
+                ],
+                "detail_expected": 1,
+                "detail_successes": 1,
+                "detail_failures": [],
+                "normalization_failures": [],
+                "normalized_records": 1,
+                "media_mode": "all",
+                "skip_media": False,
+                "posts_with_image_content": 3,  # <-- has images in source
+                "media_objects": 0,            # <-- but zero downloaded → regression
+                "media_failures": [],
+                "notes": [],
+            }
+            (output / "qa").mkdir(parents=True, exist_ok=True)
+            FR.atomic_write_json(output / "qa" / "crawl_audit.json", crawl_audit)
+            (output / "archive").mkdir(parents=True, exist_ok=True)
+            FR.write_jsonl(output / "archive" / "posts.jsonl", [{
+                "feed_id": "IMG-001",
+                "profile_uid": uid,
+                "source": {"detail_path": str(output / "raw" / "details" / uid / "IMG-001.json")},
+            }])
+            detail_dir = output / "raw" / "details" / uid
+            detail_dir.mkdir(parents=True, exist_ok=True)
+            (detail_dir / "IMG-001.json").write_text(
+                json.dumps({"code": 0, "data": {"data": {"feedCommon": {"feedId": "IMG-001"}}}}),
+                encoding="utf-8",
+            )
+            result = FR.audit(argparse.Namespace(output=str(output)))
+
+        tripwire_check = next(
+            (c for c in result["checks"] if c["name"] == "media_extraction_not_zero_jobs"), None
+        )
+        self.assertIsNotNone(tripwire_check)
+        self.assertFalse(
+            tripwire_check["passed"],
+            "tripwire must WARN when image posts exist but media_objects=0",
+        )
+
+    def test_tripwire_none_mode_skipped(self):
+        """Tripwire must PASS (info) when media_mode='none' regardless of post count."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            uid = self.fixture["uid"]
+            crawl_audit = {
+                "schema_version": "1.0",
+                "status": "PASS",
+                "visible_history_status": "complete_visible_history",
+                "captured_at": "2026-07-22T00:00:00+00:00",
+                "requested_since": None,
+                "requested_until": None,
+                "profiles": [{"uid": uid, "profile_url": f"https://q.futunn.com/profile/{uid}"}],
+                "streams": [
+                    {"profile_uid": uid, "stream": "all", "complete_for_request": True,
+                     "terminal_reason": "has_more_zero"},
+                    {"profile_uid": uid, "stream": "columns", "complete_for_request": True,
+                     "terminal_reason": "has_more_zero"},
+                ],
+                "detail_expected": 4,
+                "detail_successes": 4,
+                "detail_failures": [],
+                "normalization_failures": [],
+                "normalized_records": 4,
+                "media_mode": "none",
+                "skip_media": True,
+                "posts_with_image_content": 3,
+                "media_objects": 0,
+                "media_failures": [],
+                "notes": [],
+            }
+            (output / "qa").mkdir(parents=True, exist_ok=True)
+            FR.atomic_write_json(output / "qa" / "crawl_audit.json", crawl_audit)
+            (output / "archive").mkdir(parents=True, exist_ok=True)
+            FR.write_jsonl(output / "archive" / "posts.jsonl", [{
+                "feed_id": "POST-001",
+                "profile_uid": uid,
+                "source": {"detail_path": str(output / "raw" / "details" / uid / "POST-001.json")},
+            }])
+            detail_dir = output / "raw" / "details" / uid
+            detail_dir.mkdir(parents=True, exist_ok=True)
+            (detail_dir / "POST-001.json").write_text(
+                json.dumps({"code": 0, "data": {"data": {"feedCommon": {"feedId": "POST-001"}}}}),
+                encoding="utf-8",
+            )
+            result = FR.audit(argparse.Namespace(output=str(output)))
+
+        tripwire_check = next(
+            (c for c in result["checks"] if c["name"] == "media_extraction_not_zero_jobs"), None
+        )
+        self.assertIsNotNone(tripwire_check)
+        self.assertTrue(
+            tripwire_check["passed"],
+            "tripwire must PASS when media_mode=none (skip mode)",
+        )
+        self.assertIn("none", str(tripwire_check.get("detail", "")))
+
+    # ------ F4: trailing tag block suppression ------
+
+    def test_trailing_tags_three_or_more_downgraded(self):
+        """Symbols in trailing block of >= 3 tags not mentioned in body must be downgraded."""
+        # 3 trailing tags: TSLA, NVDA, AMD not in body → all trailing-only
+        text = "今天市场不错，关注$AAPL$后续走势。\n$TSLA$ $NVDA$ $AMD$"
+        trailing = FR._trailing_tag_symbols(text)
+        self.assertIn("TSLA", trailing)
+        self.assertIn("NVDA", trailing)
+        self.assertIn("AMD", trailing)
+        self.assertNotIn("AAPL", trailing, "AAPL mentioned in body must not be in trailing set")
+
+    def test_trailing_tags_body_mention_excluded(self):
+        """A symbol discussed in the body text must not be downgraded even if also in trailing block."""
+        text = "我今天买入$NVDA$，看好其AI路径。\n$TSLA$ $NVDA$ $AMD$"
+        trailing = FR._trailing_tag_symbols(text)
+        self.assertNotIn("NVDA", trailing, "NVDA mentioned in body must NOT be trailing-only")
+        # TSLA and AMD have no body mention
+        self.assertIn("TSLA", trailing)
+        self.assertIn("AMD", trailing)
+
+    def test_trailing_tags_two_not_triggered(self):
+        """Only 2 trailing tags must NOT trigger the block (threshold is >= 3)."""
+        text = "关注市场动向。\n$TSLA$ $NVDA$"
+        trailing = FR._trailing_tag_symbols(text)
+        self.assertEqual(len(trailing), 0, "2-tag trailing block must not be triggered")
+
+    def test_trailing_tags_pure_text_unaffected(self):
+        """Text without any $SYMBOL$ pattern must return empty set."""
+        text = "今天市场不错，继续持有苹果和特斯拉，等待机会。"
+        trailing = FR._trailing_tag_symbols(text)
+        self.assertEqual(len(trailing), 0)
+
+    def test_trailing_tags_downgrade_in_prepare(self):
+        """prepare() must assign evidence_level=D and action=none to trailing-tag-only symbols."""
+        uid = self.fixture["uid"]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            archive_args = argparse.Namespace(
+                profile=[uid],
+                since=None,
+                until=None,
+                output=str(output),
+                skip_media=True,
+                detail_workers=2,
+                media_workers=2,
+                max_pages=20,
+                refresh=False,
+            )
+            # Inject a synthetic post with 4 trailing exposure tags (only AAPL in body)
+            def patched_request_json(url, params=None, attempts=4):
+                params = params or {}
+                if url == FR.LIST_URL:
+                    stream = str(params["type"])
+                    page = "first" if int(params["load_list_type"]) == 2 else "next"
+                    key = f"{stream}:{page}"
+                    if key == "301:first":
+                        return {
+                            "result": 0,
+                            "feed": [{"feed_comm": {"feed_id": "TRAIL-001", "timestamp": 1746748800}}],
+                            "has_more": 0,
+                            "more_mark": "",
+                            "sequence": "",
+                        }
+                    # Remaining pages return empty
+                    return {"result": 0, "feed": [], "has_more": 0}
+                if url == FR.DETAIL_URL:
+                    return {
+                        "code": 0,
+                        "data": {"data": {
+                            "feedCommon": {
+                                "feedId": "TRAIL-001",
+                                "timestamp": 1746748800,
+                                "feedType": 3,
+                                "dynamicDescription": {"stringSc": "发表了"},
+                            },
+                            "feedTitle": "今天买入$AAPL$，看好其AI芯片路线",
+                            "authorInfo": {"userId": uid, "nickName": "Test"},
+                            "moduleData": [{"data": {
+                                "text": "我今天买入了Apple，成本价合理，持仓约两成。\n$TSLA$ $NVDA$ $AMD$ $META$",
+                            }}],
+                            "count": {"browse": 1, "comment": 0, "share": 0},
+                        }}
+                    }
+                raise AssertionError(f"Unexpected URL: {url}")
+
+            with mock.patch.object(FR, "request_json", side_effect=patched_request_json):
+                FR.archive(archive_args)
+            FR.prepare(argparse.Namespace(output=str(output)))
+
+            candidates = FR.read_jsonl(output / "analysis" / "candidates.jsonl")
+
+        # Candidates for TSLA/NVDA/AMD/META (trailing tags only) must be D
+        trailing_candidates = [
+            c for c in candidates
+            if c.get("trailing_tag_downgraded") is True
+        ]
+        non_trailing = [
+            c for c in candidates
+            if not c.get("trailing_tag_downgraded")
+        ]
+        self.assertTrue(len(trailing_candidates) >= 3,
+                        "At least 3 trailing-tag symbols must be flagged and downgraded")
+        for c in trailing_candidates:
+            self.assertEqual(c["evidence_prelabel"], "D",
+                             f"Trailing symbol {c.get('symbol_raw')} must be downgraded to D")
+            self.assertEqual(c["action_prelabel"], "none",
+                             f"Trailing symbol {c.get('symbol_raw')} must have action=none")
+        # AAPL (in title body) must NOT be downgraded
+        aapl_candidates = [c for c in candidates if c.get("symbol_raw") == "AAPL"]
+        for c in aapl_candidates:
+            self.assertFalse(c.get("trailing_tag_downgraded"),
+                             "AAPL in body must NOT be trailing-downgraded")
 
 
 if __name__ == "__main__":
