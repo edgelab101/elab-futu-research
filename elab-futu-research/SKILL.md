@@ -7,7 +7,7 @@ description: Archive a Futu/Moomoo public profile's visible dynamics and columns
 
 Turn one or more public Futu profile URLs into a resumable archive and an evidence-bounded research report. Make the default experience one-shot: accept the URL, choose safe defaults, run the workflow, and return the report plus audit status.
 
-Version: `1.2.0` · Last updated: `2026-07-23`
+Version: `1.2.1` · Last updated: `2026-07-23`
 
 ## Startup alignment (required)
 
@@ -174,6 +174,8 @@ analysis/market/claims_market.jsonl
 analysis/market/market_manifest.json
 analysis/market/raw/*.json
 analysis/market/*.csv
+archive/by-author/<author-name>_<uid>.md
+archive/by-author/index.md
 reports/profile.md
 reports/capability_matrix.md
 reports/rule_cards.md
@@ -184,6 +186,8 @@ manifest.json
 ```
 
 Some later files appear only after their corresponding step. Preserve `raw/` as immutable evidence.
+
+`archive/by-author/` is a readable per-blogger split of the combined archive, produced by `report` (or on demand via `export-authors`). Each author gets one markdown file named with their display name, posts newest-first with full text and links; `index.md` lists all authors by post count. Use this to browse one blogger's content by name instead of digging through numeric-UID `raw/` folders.
 
 ## Reporting rules
 

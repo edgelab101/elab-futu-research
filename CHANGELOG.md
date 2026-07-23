@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.1 — 2026-07-23
+
+Added:
+
+- `export-authors` subcommand, also run automatically at the end of `report` (and therefore `run`): splits the combined archive into one readable markdown file per blogger under `archive/by-author/<author-name>_<uid>.md`, plus an `index.md` sorted by post count. Posts are newest-first with full text, repost attribution, and per-post links. Solves browsing a single blogger's content by name instead of by numeric-UID `raw/` folders.
+
+Robustness:
+
+- Filesystem-safe author filenames (illegal + control chars replaced, CJK/emoji preserved, uid suffix for uniqueness); pipe in author names escaped in the index table; multiline repost text fully quoted; missing `posts.jsonl` fails with a clear error.
+
 ## 1.2.0 — 2026-07-23
 
 Added:
