@@ -77,12 +77,29 @@ python3 elab-futu-research/scripts/futu_research.py run \
 
 ```bash
 python3 elab-futu-research/scripts/futu_research.py run \
-  --profile "https://q.futunn.com/profile/<uid>" \
+  --profile “https://q.futunn.com/profile/<uid>” \
   --since 2025-01-01 \
   --until 2025-12-31
 ```
 
-## 为什么分析不是简单算“荐股胜率”
+媒体下载模式（`--media`，默认 `all`）：
+
+```bash
+# 跳过媒体下载
+python3 elab-futu-research/scripts/futu_research.py run \
+  --profile “https://q.futunn.com/profile/<uid>” \
+  --media none
+
+# 仅下载含订单/成交/持仓等证据关键词帖子的媒体
+# 适合订单截图型博主，大幅降低下载量同时保留关键取证图片
+python3 elab-futu-research/scripts/futu_research.py run \
+  --profile “https://q.futunn.com/profile/<uid>” \
+  --media evidence
+```
+
+`--skip-media` 是 `--media none` 的旧别名，两者等效。
+
+## 为什么分析不是简单算”荐股胜率”
 
 公开发言至少要分四层：
 

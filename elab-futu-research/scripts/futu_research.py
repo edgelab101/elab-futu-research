@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-VERSION = "1.1.2"
+VERSION = "1.2.0"
 SCHEMA_VERSION = "1.0"
 LIST_URL = "https://q.futunn.com/nnq/personal-list"
 REPORT_FOOTER = (
@@ -222,6 +222,14 @@ URGENCY_KEYWORDS = (
     "now",
     "immediately",
     "urgent",
+)
+# Keywords that indicate a post contains actual trade evidence (orders, fills, positions).
+# Used by evidence media mode to decide which posts' media to download.
+EVIDENCE_MEDIA_KEYWORDS = (
+    "订单", "成交", "买入", "卖出", "持仓", "清仓", "加仓", "减仓",
+    "止损", "止盈", "盈亏", "收益", "亏损", "交割", "行权", "期权",
+    "成本价", "对账单",
+    "order", "filled", "position", "pnl", "bought", "sold",
 )
 
 
@@ -699,6 +707,16 @@ def module_text_own(modules: Any) -> str:
     return "\n\n".join(paragraphs).strip()
 
 
+def _has_repost_content(obj: Dict[str, Any]) -> bool:
+    """Return True if a repost origin object contains actual text or image content.
+
+    Guards against treating an empty-shell origin dict (richTextItems AND
+    pictureItems both absent/empty) as a repost indicator, which would
+    mis-classify genuine original posts as reposts (F2 backlog guard).
+    """
+    return bool(obj.get("richTextItems")) or bool(obj.get("pictureItems"))
+
+
 def _repost_original_obj(detail: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Return the first non-empty repost content object from well-known paths.
 
@@ -707,15 +725,16 @@ def _repost_original_obj(detail: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     2. feedModel.summary.original
     3. First moduleData[i].data.origin that is a non-empty dict
 
-    Returns None for original posts.
+    Returns None for original posts or when the origin object is an empty shell
+    (richTextItems and pictureItems both empty — F2 guard against mis-classification).
     """
     fm = detail.get("feedModel")
     if isinstance(fm, dict):
         fm_original = fm.get("original")
-        if isinstance(fm_original, dict) and fm_original:
+        if isinstance(fm_original, dict) and fm_original and _has_repost_content(fm_original):
             return fm_original
         summary_original = (fm.get("summary") or {}).get("original")
-        if isinstance(summary_original, dict) and summary_original:
+        if isinstance(summary_original, dict) and summary_original and _has_repost_content(summary_original):
             return summary_original
     for module in (detail.get("moduleData") or []):
         if not isinstance(module, dict):
@@ -724,7 +743,7 @@ def _repost_original_obj(detail: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not isinstance(data_field, dict):
             continue
         origin = data_field.get("origin")
-        if isinstance(origin, dict) and origin:
+        if isinstance(origin, dict) and origin and _has_repost_content(origin):
             return origin
     return None
 
@@ -739,6 +758,87 @@ def _text_from_rich_items(obj: Dict[str, Any]) -> str:
         if isinstance(t, str) and t.strip():
             parts.append(t.strip())
     return clean_text(" ".join(parts))
+
+
+def _post_qualifies_for_evidence_media(envelope: Dict[str, Any]) -> Tuple[bool, str]:
+    """Determine whether a post qualifies for evidence-mode media download.
+
+    Returns (qualifies, reason_code).
+    Conditions:
+      - is_repost=False (original content only)
+      - title+text contains at least one EVIDENCE_MEDIA_KEYWORDS match
+
+    Used by download_media when media_mode='evidence'.
+    """
+    detail = detail_data(envelope)
+    orig_obj = _repost_original_obj(detail)
+    if orig_obj:
+        return False, "is_repost"
+    title = clean_text(str(detail.get("feedTitle") or ""))
+    modules = detail.get("moduleData") or []
+    text = module_text(modules)
+    combined = (title + "\n" + text).lower()
+    for kw in EVIDENCE_MEDIA_KEYWORDS:
+        if kw.lower() in combined:
+            return True, f"matched:{kw}"
+    return False, "no_evidence_keyword"
+
+
+def _trailing_tag_symbols(text: str) -> frozenset:
+    """Return frozenset of uppercase symbol codes that appear ONLY in a trailing
+    tag block at the end of text.
+
+    A trailing tag block is a suffix of >= 3 consecutive $SYMBOL$ references
+    separated only by whitespace or common punctuation (no substantive body text
+    between them or after the last tag).  Symbols that also appear in the body
+    text before the block are excluded from the returned set.
+
+    Used by prepare() to downgrade exposure-seeking trailing tags to evidence_level=D.
+    """
+    # Find all $SYMBOL$ occurrences in order
+    tag_pat = re.compile(r'\$([A-Za-z][A-Za-z0-9.-]{0,7})\$')
+    matches = list(tag_pat.finditer(text))
+    if len(matches) < 3:
+        return frozenset()
+
+    # Separator: only whitespace and common punctuation chars
+    sep_pat = re.compile(
+        r'^[\s　、。，！？；：'
+        r',，。！？；：、/|&\-~（）\(\)\[\]【】\{\}]+$'
+    )
+
+    # Text after the last match must be empty or all separators
+    tail = text[matches[-1].end():]
+    if tail and not sep_pat.match(tail):
+        return frozenset()
+
+    # Walk backwards collecting the trailing block
+    block_start_idx = len(matches) - 1  # index in matches list
+    for i in range(len(matches) - 2, -1, -1):
+        between = text[matches[i].end():matches[i + 1].start()]
+        if between and not sep_pat.match(between):
+            break  # non-separator content stops the block
+        block_start_idx = i
+
+    trailing_match_objs = matches[block_start_idx:]
+    if len(trailing_match_objs) < 3:
+        return frozenset()
+
+    # Body text is everything before the trailing block
+    body = text[:trailing_match_objs[0].start()]
+
+    trailing_only: set = set()
+    for m in trailing_match_objs:
+        sym = m.group(1).upper()
+        # Check if symbol appears anywhere in body (as $SYM$ or word boundary match)
+        in_body = bool(re.search(
+            r'(?<![A-Za-z0-9.])' + re.escape(sym) + r'(?![A-Za-z0-9.])',
+            body, re.IGNORECASE
+        ))
+        if not in_body:
+            trailing_only.add(sym)
+
+    return frozenset(trailing_only)
 
 
 def canonical_symbol(code: str, market: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -920,13 +1020,41 @@ def download_media(
     detail_paths: Sequence[Path],
     output: Path,
     workers: int,
+    media_mode: str = "all",
 ) -> List[Dict[str, Any]]:
+    """Download media for the given detail files.
+
+    media_mode controls which posts' media are downloaded:
+      'all'      — download all (default, same as pre-v1.2.0 behaviour)
+      'evidence' — only posts where is_repost=False and text matches
+                   EVIDENCE_MEDIA_KEYWORDS; others get a skip record in manifest
+      'none'     — caller should not reach here (archive() guards this)
+    """
     jobs: List[Tuple[str, int, Dict[str, str]]] = []
+    skip_records: List[Dict[str, Any]] = []
+
     for path in detail_paths:
         envelope = read_json(path, {})
         detail = detail_data(envelope)
         feed_id = str((detail.get("feedCommon") or {}).get("feedId") or path.stem)
-        for index, item in enumerate(extract_media_urls(detail), start=1):
+        media_urls = extract_media_urls(detail)
+
+        if media_mode == "evidence" and media_urls:
+            qualifies, reason = _post_qualifies_for_evidence_media(envelope)
+            if not qualifies:
+                for index, item in enumerate(media_urls, start=1):
+                    skip_records.append({
+                        "uid": uid,
+                        "feed_id": feed_id,
+                        "index": index,
+                        "status": "skipped",
+                        "skip_reason": f"mode=evidence,matched=False,reason={reason}",
+                        "url": item["url"],
+                        "source_field": item["source_field"],
+                    })
+                continue
+
+        for index, item in enumerate(media_urls, start=1):
             jobs.append((feed_id, index, item))
 
     def fetch_one(job: Tuple[str, int, Dict[str, str]]) -> Dict[str, Any]:
@@ -989,7 +1117,10 @@ def download_media(
             if index % 50 == 0 or index == len(jobs):
                 failures = sum(item["status"] != "ok" for item in items)
                 log(f"[{uid}/media] {index}/{len(jobs)} failed={failures}")
-    return items
+    # Append evidence-mode skip records (status='skipped') after download records.
+    # The manifest merging loop in archive() treats any status != 'ok' as non-preferred,
+    # so skip records are stored but never replace successful download entries.
+    return items + skip_records
 
 
 def normalize_detail(
@@ -1282,6 +1413,22 @@ def archive(args: argparse.Namespace) -> Dict[str, Any]:
     if not uids:
         raise ResearchError("At least one --profile is required.")
 
+    # F1: resolve effective media mode.
+    # --media {all,none,evidence} takes precedence; --skip-media is a backward-compat alias for none.
+    media_mode: str = getattr(args, "media", None) or "all"
+    skip_media_flag: bool = bool(getattr(args, "skip_media", False))
+    if skip_media_flag:
+        if media_mode == "all":
+            # --skip-media without explicit --media: backward-compat → none
+            media_mode = "none"
+        else:
+            # Both specified: --media wins; warn once to stderr
+            print(
+                f"WARNING: --skip-media and --media={media_mode} both specified; "
+                f"using --media={media_mode}.",
+                file=sys.stderr,
+            )
+
     previous_index = read_json(output / "raw" / "feed_index.json", {})
     if not isinstance(previous_index, dict):
         previous_index = {}
@@ -1332,9 +1479,9 @@ def archive(args: argparse.Namespace) -> Dict[str, Any]:
             output / "raw" / "details" / uid / f"{feed_id}.json"
             for feed_id in successes
         ]
-        if not args.skip_media:
+        if media_mode != "none":
             media_items.extend(
-                download_media(uid, detail_paths, output, workers=args.media_workers)
+                download_media(uid, detail_paths, output, workers=args.media_workers, media_mode=media_mode)
             )
 
     atomic_write_json(output / "raw" / "feed_index.json", index)
@@ -1391,7 +1538,22 @@ def archive(args: argparse.Namespace) -> Dict[str, Any]:
             normalization_failures.append(
                 {"uid": uid, "feed_id": feed_id, "error": str(error)}
             )
+
     write_archive_files(output, records)
+
+    # Count posts that have extractable image URLs in their raw source files.
+    # This is independent of media_mode so the tripwire (F3) works correctly
+    # even when media_mode='none' or 'evidence'.
+    posts_with_image_content = 0
+    for record in records:
+        _uid_r = str(record.get("profile_uid") or "")
+        _fid_r = str(record.get("feed_id") or "")
+        if _uid_r and _fid_r:
+            _p = output / "raw" / "details" / _uid_r / f"{_fid_r}.json"
+            if _p.exists():
+                _env_r = read_json(_p, {})
+                if isinstance(_env_r, dict) and extract_media_urls(detail_data(_env_r)):
+                    posts_with_image_content += 1
 
     all_history = since_dt is None
     complete_streams = all(row["complete_for_request"] for row in stream_audits)
@@ -1404,9 +1566,13 @@ def archive(args: argparse.Namespace) -> Dict[str, Any]:
         )
     )
     detail_success_count = detail_expected - len(detail_failures)
-    media_failures = [item for item in media_by_key.values() if item.get("status") != "ok"]
+    # Exclude skipped records (evidence mode) from media_failures count.
+    media_failures = [
+        item for item in media_by_key.values()
+        if item.get("status") not in ("ok", "skipped")
+    ]
     if complete_streams and not detail_failures and not normalization_failures:
-        status = "PASS" if not media_failures or args.skip_media else "WARN"
+        status = "PASS" if not media_failures or media_mode == "none" else "WARN"
     else:
         status = "FAIL"
     visible_status = (
@@ -1430,7 +1596,9 @@ def archive(args: argparse.Namespace) -> Dict[str, Any]:
         "detail_failures": detail_failures,
         "normalization_failures": normalization_failures,
         "normalized_records": len(records),
-        "skip_media": args.skip_media,
+        "media_mode": media_mode,
+        "skip_media": media_mode == "none",  # backward-compat alias
+        "posts_with_image_content": posts_with_image_content,
         "media_objects": len(media_by_key),
         "media_failures": media_failures,
         "notes": [
@@ -1450,7 +1618,8 @@ def archive(args: argparse.Namespace) -> Dict[str, Any]:
         "options": {
             "since": args.since,
             "until": args.until,
-            "skip_media": args.skip_media,
+            "media_mode": media_mode,
+            "skip_media": media_mode == "none",  # backward-compat alias
         },
         "counts": {
             "posts": len(records),
@@ -1567,8 +1736,18 @@ def prepare(args: argparse.Namespace) -> Dict[str, Any]:
             symbols = [{"raw": None, "code": None, "market": None, "name": None}]
             symbol_source = "none"
         all_hits = action_hits + direction_hits + first_person_hits
+        # F4: identify symbols that appear only in a trailing exposure-tag block.
+        # >= 3 consecutive $SYMBOL$ at text end with no body mention → downgrade to D/none.
+        trailing_only_codes = _trailing_tag_symbols(text)
         for symbol in symbols:
             raw_symbol = symbol.get("raw") if isinstance(symbol, dict) else str(symbol)
+            sym_code = (symbol.get("code") or "").upper() if isinstance(symbol, dict) else ""
+            is_trailing = bool(trailing_only_codes) and (
+                sym_code in trailing_only_codes
+                or (raw_symbol and raw_symbol.upper() in trailing_only_codes)
+            )
+            effective_evidence = "D" if is_trailing else evidence
+            effective_action = "none" if is_trailing else action
             candidate_id = f"{row.get('feed_id')}:{raw_symbol or 'GENERAL'}"
             candidates.append(
                 {
@@ -1581,15 +1760,16 @@ def prepare(args: argparse.Namespace) -> Dict[str, Any]:
                     "symbol_raw": raw_symbol,
                     "symbol_source": symbol_source,
                     "direction_prelabel": direction,
-                    "action_prelabel": action,
-                    "evidence_prelabel": evidence,
+                    "action_prelabel": effective_action,
+                    "evidence_prelabel": effective_evidence,
                     "evidence_span": evidence_span(text, all_hits),
                     "keyword_hits": sorted(set(all_hits)),
                     "tone_prelabels": tone_prelabels(text),
                     "is_repost": bool(row.get("is_repost")),
+                    "trailing_tag_downgraded": is_trailing,
                     "ability_eligible_prelabel": (
                         not row.get("is_repost")
-                        and evidence in {"B", "C"}
+                        and effective_evidence in {"B", "C"}
                         and raw_symbol is not None
                     ),
                     "needs_symbol_verification": symbol_source == "inferred",
@@ -2803,9 +2983,20 @@ def audit(args: argparse.Namespace) -> Dict[str, Any]:
         if not row.get("complete_for_request")
     ]
     add("streams_complete_for_request", not incomplete_streams, "error", incomplete_streams)
+    # F2: uniqueness is now (profile_uid, feed_id).
+    # Same feed_id across different profile_uids (cross-blogger repost of same post) is NOT a dup.
+    # Self-reposts are merged at archive time so posts.jsonl should already be clean.
     feed_ids = [str(row.get("feed_id")) for row in posts]
-    duplicates = [key for key, count in Counter(feed_ids).items() if count > 1]
-    add("normalized_feed_ids_unique", not duplicates, "error", duplicates)
+    post_pairs = [
+        (str(row.get("profile_uid") or ""), str(row.get("feed_id") or ""))
+        for row in posts
+    ]
+    duplicate_pairs = [
+        f"{uid}:{fid}"
+        for (uid, fid), count in Counter(post_pairs).items()
+        if count > 1
+    ]
+    add("normalized_feed_ids_unique", not duplicate_pairs, "error", duplicate_pairs)
     missing_sources = []
     for row in posts:
         detail_path = str((row.get("source") or {}).get("detail_path") or "")
@@ -2956,19 +3147,38 @@ def audit(args: argparse.Namespace) -> Dict[str, Any]:
         "warning",
         len(media_failures),
     )
-    # Tripwire: detect the silent media-extraction failure mode where skip_media=false
-    # and posts exist but zero download jobs were produced.  This catches extraction
-    # regressions (e.g. dict-valued orgPic/bigPic structure not handled).
-    _skip_media_flag = bool(crawl.get("skip_media")) if isinstance(crawl, dict) else False
+    # F3: Tripwire for silent media-extraction regressions (e.g. dict-valued
+    # orgPic/bigPic not handled).  Denominator changes to posts_with_image_content
+    # (posts that actually have image URLs in source) rather than total post count,
+    # preventing false alarms on pure-text blogger archives.
+    _media_mode = (
+        str(crawl.get("media_mode") or ("none" if crawl.get("skip_media") else "all"))
+        if isinstance(crawl, dict) else "all"
+    )
     _media_objects = int(crawl.get("media_objects") or 0) if isinstance(crawl, dict) else 0
-    if not _skip_media_flag and len(posts) > 0 and _media_objects == 0:
+    _posts_with_images = int(crawl.get("posts_with_image_content") or 0) if isinstance(crawl, dict) else 0
+    if _media_mode == "none":
+        add(
+            "media_extraction_not_zero_jobs",
+            True,
+            "info",
+            "skipped_by_mode=none",
+        )
+    elif _posts_with_images == 0:
+        add(
+            "media_extraction_not_zero_jobs",
+            True,
+            "info",
+            f"N/A (posts_with_image_content=0; text-only archive or no qualifying posts)",
+        )
+    elif _media_objects == 0:
         add(
             "media_extraction_not_zero_jobs",
             False,
             "warning",
             (
-                f"skip_media=false, posts={len(posts)}, media_objects=0 — "
-                "media extraction produced zero jobs while post content exists; "
+                f"mode={_media_mode}, posts_with_image_content={_posts_with_images}, "
+                "media_objects=0 — extraction produced zero jobs while image posts exist; "
                 "possible nested-structure extraction regression"
             ),
         )
@@ -2977,7 +3187,7 @@ def audit(args: argparse.Namespace) -> Dict[str, Any]:
             "media_extraction_not_zero_jobs",
             True,
             "info",
-            f"media_objects={_media_objects} skip_media={_skip_media_flag}",
+            f"media_objects={_media_objects} mode={_media_mode} posts_with_image_content={_posts_with_images}",
         )
     add(
         "reviewed_claims_available",
@@ -3106,7 +3316,21 @@ def add_archive_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--since", help="Start date YYYY-MM-DD; default is all visible history.")
     parser.add_argument("--until", help="End date YYYY-MM-DD; default is today/latest visible.")
     parser.add_argument("--output", default="./futu-research-output")
-    parser.add_argument("--skip-media", action="store_true")
+    parser.add_argument(
+        "--media",
+        choices=["all", "none", "evidence"],
+        default="all",
+        help=(
+            "Media download mode: 'all' downloads all images (default); "
+            "'none' skips all downloads; 'evidence' downloads only images from "
+            "original posts whose text matches EVIDENCE_MEDIA_KEYWORDS (orders, fills, positions)."
+        ),
+    )
+    parser.add_argument(
+        "--skip-media",
+        action="store_true",
+        help="Deprecated alias for --media=none. Ignored when --media is also specified.",
+    )
     parser.add_argument("--detail-workers", type=int, default=4)
     parser.add_argument("--media-workers", type=int, default=6)
     parser.add_argument("--max-pages", type=int, default=10000)
