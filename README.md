@@ -4,7 +4,29 @@ by 杰尼马 · [EdgeLab](https://github.com/edgelab101)：给散户的可审计
 
 把一个或多个富途牛牛公开主页，变成”可复查的完整归档 + 结合当时行情的博主研究报告”。
 
-它不是荐股器，也不会把“提到某只股票”误判成“真实持仓”。它保存原始证据、动态、专栏、图片、失败清单与审计结果，再把观点、交易动作、行情背景和事后结果分开分析。
+它不是荐股器，也不会把”提到某只股票”误判成”真实持仓”。它保存原始证据、动态、专栏、图片、失败清单与审计结果，再把观点、交易动作、行情背景和事后结果分开分析。
+
+## 支持的平台
+
+| 平台 | 域名 | 路由方式 |
+|------|------|----------|
+| 富途牛牛 | q.futunn.com | 完整 URL 或纯数字 UID |
+| 老虎社区 | laohu8.com | 完整 URL（`https://www.laohu8.com/personal/<uid>/`） |
+
+Dispatcher 按 URL 域名自动识别平台；纯数字 UID 默认路由到富途（两平台 UID 格式相同，无法仅凭数字区分）。
+
+```bash
+# 富途
+python3 elab-futu-research/scripts/futu_research.py run \
+  --profile “https://q.futunn.com/profile/<uid>” \
+  --output “./futu-research-output”
+# 老虎
+python3 elab-futu-research/scripts/futu_research.py run \
+  --profile “https://www.laohu8.com/personal/<uid>/” \
+  --output “./futu-research-output”
+```
+
+老虎当前限制：不抓媒体（`--media` 对老虎等价 `none`）、无专栏概念、转发暂标 `is_repost=False`。
 
 ## 最省事的用法
 
