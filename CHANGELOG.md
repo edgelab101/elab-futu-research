@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0 — 2026-07-23
+
+Added:
+
+- Multi-platform adapter architecture: `CaptureAdapter` base class with platform-specific implementations; URL domain dispatcher auto-routes `laohu8.com` → `TigerAdapter`, `q.futunn.com` / numeric UID → `FutuAdapter`.
+- `TigerAdapter`: pure-stdlib HTML parser for laohu8.com community profiles; extracts post text, timestamps, interaction counts, and `$Name(CODE)$`-format stock symbols from Tiger posts.
+- Tiger platform support via `--profile "https://www.laohu8.com/personal/<uid>/"` — downstream `prepare`, `market`, `report`, and `export-authors` steps reuse unchanged.
+
+Changed:
+
+- Crawl audit now validates against `adapter.expected_streams` rather than hardcoding "dynamics + columns"; Tiger archives pass with dynamics-only stream.
+- Monthly markdown titles and report headers use platform-neutral wording (no Futu-specific labels).
+- `export-authors` homepage link uses the platform URL recorded in each author's archive entry, not a hardcoded Futu URL pattern.
+
 ## 1.2.1 — 2026-07-23
 
 Added:

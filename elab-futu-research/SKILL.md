@@ -1,13 +1,13 @@
 ---
 name: elab-futu-research
-description: Archive a Futu/Moomoo public profile's visible dynamics and columns, preserve raw evidence and media, enrich time-frozen claims with market context, compare trading behavior across regimes, and generate auditable blogger research. Use when a user provides one or more q.futunn.com profile URLs or asks to crawl, save, review, compare, or analyze Futu bloggers, posts, columns, trading style, discipline, tone, or historical calls.
+description: Archive public profiles from Futu (q.futunn.com) or Tiger (laohu8.com): save visible dynamics and posts, columns (Futu only), raw evidence and media (Futu only), enrich time-frozen claims with market context, compare trading behavior across regimes, and generate auditable blogger research. Dispatcher routes by URL domain — full laohu8.com URL → Tiger; numeric UID or q.futunn.com URL → Futu. Use when a user provides one or more q.futunn.com or laohu8.com profile URLs or asks to crawl, save, review, compare, or analyze Futu or Tiger bloggers, posts, trading style, discipline, tone, or historical calls.
 ---
 
 # Elab Futu Research
 
-Turn one or more public Futu profile URLs into a resumable archive and an evidence-bounded research report. Make the default experience one-shot: accept the URL, choose safe defaults, run the workflow, and return the report plus audit status.
+Turn one or more public profile URLs — Futu (q.futunn.com) or Tiger (laohu8.com) — into a resumable archive and an evidence-bounded research report. Make the default experience one-shot: accept the URL, choose safe defaults, run the workflow, and return the report plus audit status.
 
-Version: `1.2.1` · Last updated: `2026-07-23`
+Version: `1.3.0` · Last updated: `2026-07-23`
 
 ## Startup alignment (required)
 
@@ -15,7 +15,7 @@ Before running any capture or producing any deliverable, align on the following 
 
 Collect only what is still missing, in **one message** (not one question per item):
 
-1. **Research target** — which Futu profile URL(s) or numeric UID(s)?
+1. **Research target** — which profile URL(s)? Supports q.futunn.com (Futu) and laohu8.com (Tiger). Pass a full laohu8.com URL for Tiger; a numeric UID defaults to Futu.
 2. **Time range** — default is all publicly visible history; echo this back explicitly even when the user did not specify ("全量历史" or the explicit window they gave).
 3. **Deliverables** — one or more of: ① 完整归档 ② 研究报告 ③ 多博主对比 ④ 规则卡 (multiple allowed).
 4. **Other constraints** — skip media, custom output directory, redaction needs, or anything else that changes the run.
@@ -28,13 +28,13 @@ Then proceed with the workflow.
 
 ## Default behavior
 
-- Require only a profile URL or numeric UID.
+- Require only a profile URL or numeric UID. The dispatcher routes by domain: a full `laohu8.com` URL → Tiger; a numeric UID or `q.futunn.com` URL → Futu.
 - If no date is supplied, capture all content still visible at run time.
-- Always capture both streams:
-  - dynamics/all (`type=301`)
-  - columns (`type=302`)
+- Capture all expected streams per platform:
+  - Futu: dynamics/all (`type=301`) and columns (`type=302`)
+  - Tiger: dynamics only (no columns concept)
 - Preserve original posts and reposts. Exclude reposts from ability scoring by default, but keep them searchable.
-- Download public post media in three modes: `all` (default), `none` (skip), `evidence` (only posts matching built-in order/fill/position evidence keywords — recommended for order-screenshot bloggers). `--skip-media` is retained as an alias for `--media none`.
+- Download public post media in three modes: `all` (default), `none` (skip), `evidence` (only posts matching built-in order/fill/position evidence keywords — recommended for order-screenshot bloggers). `--skip-media` is retained as an alias for `--media none`. For Tiger profiles, `--media` is treated as `none` regardless of the flag; media download is not yet supported.
 - Write to `./futu-research-output/` unless the user names another directory.
 - Resume safely from cached pages/details/media. Never delete raw evidence; rebuild derived files atomically.
 - Use conservative request rates. Stop and report interface drift, login, CAPTCHA, or access denial; do not bypass access controls.
@@ -58,9 +58,21 @@ python3 scripts/futu_research.py run \
   --output "./futu-research-output"
 ```
 
+For Tiger (laohu8.com) profiles:
+
+```bash
+python3 scripts/futu_research.py run \
+  --profile "https://www.laohu8.com/personal/<uid>/" \
+  --output "./futu-research-output"
+```
+
 `run` is a machine-only exploratory pipeline: it executes all steps in sequence and marks every output as `exploratory`. Human claim review (step 3) can be performed after `run` completes; re-run `market` and `report` afterwards to incorporate reviewed decisions. To enforce the claim-freeze gate strictly — no outcome data visible before claims are frozen — run the steps individually in the order documented below. Both modes are valid; choose based on whether human review happens before or after outcome enrichment.
 
 For multiple bloggers, repeat `--profile`. Optional `--since YYYY-MM-DD` and `--until YYYY-MM-DD` limit the archive. Use `--media none` (or legacy alias `--skip-media`) to skip media; `--media evidence` limits downloads to posts matching order-evidence keywords.
+
+**Platform routing**: the dispatcher identifies the platform by URL domain. Pass a full `laohu8.com` URL to target Tiger. Numeric-only UIDs are routed to Futu because both platforms use numeric UIDs and they cannot be distinguished without a domain.
+
+**Tiger current limits**: media download is not supported (`--media` has no effect); no column stream; repost detection is not yet implemented (posts are marked `is_repost=False`).
 
 Run the environment and endpoint check first when the interface may have changed:
 
@@ -83,7 +95,7 @@ python3 scripts/futu_research.py archive --profile "<profile-url>" --output "<di
 
 Do not call an archive complete unless `qa/crawl_audit.json` confirms:
 
-- both streams were attempted;
+- all expected streams were attempted (Futu: dynamics + columns; Tiger: dynamics only);
 - each requested stream reached `has_more=0`, or crossed the requested start boundary;
 - all retained feed IDs have cached detail responses or appear in an explicit failure list;
 - normalized IDs are unique;
