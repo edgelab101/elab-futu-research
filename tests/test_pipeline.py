@@ -143,6 +143,11 @@ class PipelineTest(unittest.TestCase):
             self.assertTrue(result["publication_gate"]["data_chain_passed"])
             self.assertTrue((output / "reports" / "profile.md").exists())
             self.assertTrue((output / "qa" / "adversarial_audit.json").exists())
+            # F1/F4: report() must auto-create archive/by-author/index.md
+            self.assertTrue(
+                (output / "archive" / "by-author" / "index.md").exists(),
+                "report() must auto-create archive/by-author/index.md",
+            )
             # Verify report footer credit and disclaimer are present in all report files
             for report_name in ("profile.md", "capability_matrix.md", "rule_cards.md"):
                 report_text = (output / "reports" / report_name).read_text(encoding="utf-8")
@@ -371,8 +376,8 @@ class PipelineTest(unittest.TestCase):
 
     # ------ F5: version ------
     def test_version_string(self):
-        """VERSION constant must be bumped to 1.2.0 (F5)."""
-        self.assertEqual(FR.VERSION, "1.2.0")
+        """VERSION constant must be bumped to 1.2.1 (F6/export-authors release)."""
+        self.assertEqual(FR.VERSION, "1.2.1")
 
     # ------ F1: OSError in main exits 2 cleanly ------
     def test_output_file_path_exits_cleanly(self):
@@ -1135,6 +1140,325 @@ class PipelineTest(unittest.TestCase):
         for c in aapl_candidates:
             self.assertFalse(c.get("trailing_tag_downgraded"),
                              "AAPL in body must NOT be trailing-downgraded")
+
+
+    # ------ F2 / _safe_filename ------
+
+    def test_safe_filename_preserves_chinese_and_truncates(self):
+        """_safe_filename keeps Chinese chars, emoji, strips surrounding space, truncates to 80."""
+        self.assertEqual(FR._safe_filename("虚构研究员甲"), "虚构研究员甲")
+        # Emoji preserved
+        self.assertEqual(FR._safe_filename("博主🔥"), "博主🔥")
+        # Leading/trailing whitespace stripped
+        self.assertEqual(FR._safe_filename("  hello  "), "hello")
+        # Truncation at 80 chars
+        long_name = "A" * 100
+        self.assertEqual(len(FR._safe_filename(long_name)), 80)
+
+    def test_safe_filename_replaces_illegal_chars(self):
+        """_safe_filename replaces filesystem-illegal chars with _ and collapses runs."""
+        # Each illegal character individually
+        for ch in '/\\:*?"<>|':
+            result = FR._safe_filename(f"a{ch}b")
+            self.assertNotIn(ch, result, f"char {ch!r} must be replaced")
+            self.assertIn("a", result)
+            self.assertIn("b", result)
+        # Consecutive replacements collapse to single underscore
+        result = FR._safe_filename("a//b")
+        self.assertNotIn("__", result, "consecutive underscores must be collapsed")
+        # Control character replaced
+        result = FR._safe_filename("a\x00b")
+        self.assertNotIn("\x00", result)
+
+    def test_safe_filename_empty_input_returns_empty(self):
+        """_safe_filename returns '' for empty string (caller uses uid_<uid> fallback)."""
+        self.assertEqual(FR._safe_filename(""), "")
+        self.assertEqual(FR._safe_filename("   "), "")
+        # String that reduces to only underscores after replacement
+        self.assertEqual(FR._safe_filename("///"), "")
+
+    # ------ F1 / export-authors subcommand ------
+
+    def test_export_authors_missing_archive_exits_2(self):
+        """export-authors on empty output dir must exit 2 mentioning 'archive'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as mock_err:
+                result = FR.main(["export-authors", "--output", tmp])
+            err_text = mock_err.getvalue()
+        self.assertEqual(result, 2, "exit code must be 2 when posts.jsonl is missing")
+        self.assertIn("archive", err_text.lower(),
+                      "error message must mention 'archive'")
+
+    def test_export_authors_creates_files_and_index(self):
+        """export-authors creates one .md per author and index.md; index lists all authors."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            (output / "archive").mkdir()
+
+            uid_a = "11111111"
+            uid_b = "22222222"
+            posts = [
+                {
+                    "profile_uid": uid_a,
+                    "author_name": "博主甲",
+                    "feed_id": "FEED-A1",
+                    "date": "2026-07-20",
+                    "published_at": "2026-07-20T10:00:00+08:00",
+                    "title": "分析文章",
+                    "text": "今天买入了$TSLA$。",
+                    "is_repost": False,
+                    "is_column": False,
+                    "symbols": [{"raw": "TSLA", "code": "TSLA", "market": "US", "name": None}],
+                    "metrics": {"likes": 10, "comments": 2, "reposts": 0, "views": 100},
+                    "url": "https://q.futunn.com/feed/FEED-A1",
+                    "original_author": None,
+                    "original_text": None,
+                },
+                {
+                    "profile_uid": uid_a,
+                    "author_name": "博主甲",
+                    "feed_id": "FEED-A2",
+                    "date": "2026-07-22",
+                    "published_at": "2026-07-22T08:00:00+08:00",
+                    "title": "",
+                    "text": "后续观察。",
+                    "is_repost": False,
+                    "is_column": True,
+                    "symbols": [],
+                    "metrics": {"likes": 0, "comments": 0, "reposts": 0, "views": 50},
+                    "url": "https://q.futunn.com/feed/FEED-A2",
+                    "original_author": None,
+                    "original_text": None,
+                },
+                {
+                    "profile_uid": uid_b,
+                    "author_name": "博主乙",
+                    "feed_id": "FEED-B1",
+                    "date": "2026-07-21",
+                    "published_at": "2026-07-21T09:00:00+08:00",
+                    "title": "转发帖",
+                    "text": "看了一下，值得关注。",
+                    "is_repost": True,
+                    "is_column": False,
+                    "symbols": [],
+                    "metrics": {"likes": 5, "comments": 1, "reposts": 0, "views": 80},
+                    "url": "https://q.futunn.com/feed/FEED-B1",
+                    "original_author": "原帖作者",
+                    "original_text": "原帖正文内容。",
+                },
+            ]
+            FR.write_jsonl(output / "archive" / "posts.jsonl", posts)
+
+            args = argparse.Namespace(output=str(output))
+            result = FR.export_authors(args)
+
+            # Two author files created — assertions inside the with block (tempdir is live)
+            by_author = output / "archive" / "by-author"
+            self.assertTrue(by_author.exists(), "by-author/ directory must be created")
+            self.assertTrue((by_author / "index.md").exists(), "index.md must be created")
+            self.assertEqual(result["authors"], 2)
+            self.assertEqual(result["total_posts"], 3)
+
+            # Each uid has a file (≥ 2 author files + index.md = ≥ 3 total)
+            files = list(by_author.glob("*.md"))
+            self.assertGreaterEqual(len(files), 3,
+                                    "at least 2 author .md files + index.md expected")
+
+            # index.md contains both author names
+            index_text = (by_author / "index.md").read_text(encoding="utf-8")
+            self.assertIn("博主甲", index_text)
+            self.assertIn("博主乙", index_text)
+
+    def test_export_authors_post_order_newest_first(self):
+        """Author .md must list newest post first (reverse chronological)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            (output / "archive").mkdir()
+            uid = "99887766"
+            posts = [
+                {
+                    "profile_uid": uid,
+                    "author_name": "TestAuthor",
+                    "feed_id": "OLD",
+                    "date": "2026-01-01",
+                    "published_at": "2026-01-01T08:00:00+08:00",
+                    "title": "旧帖",
+                    "text": "这是旧的帖子。",
+                    "is_repost": False,
+                    "is_column": False,
+                    "symbols": [],
+                    "metrics": {"likes": 0, "comments": 0, "reposts": 0, "views": 0},
+                    "url": "https://q.futunn.com/feed/OLD",
+                    "original_author": None,
+                    "original_text": None,
+                },
+                {
+                    "profile_uid": uid,
+                    "author_name": "TestAuthor",
+                    "feed_id": "NEW",
+                    "date": "2026-07-22",
+                    "published_at": "2026-07-22T08:00:00+08:00",
+                    "title": "新帖",
+                    "text": "这是新的帖子。",
+                    "is_repost": False,
+                    "is_column": False,
+                    "symbols": [],
+                    "metrics": {"likes": 0, "comments": 0, "reposts": 0, "views": 0},
+                    "url": "https://q.futunn.com/feed/NEW",
+                    "original_author": None,
+                    "original_text": None,
+                },
+            ]
+            FR.write_jsonl(output / "archive" / "posts.jsonl", posts)
+            FR.export_authors(argparse.Namespace(output=str(output)))
+
+            # Assertions inside the with block (tempdir is live)
+            by_author = output / "archive" / "by-author"
+            author_files = [f for f in by_author.glob("*.md") if f.name != "index.md"]
+            self.assertEqual(len(author_files), 1)
+            content = author_files[0].read_text(encoding="utf-8")
+            # Check that the newer post's section heading appears before the older one.
+            # Use "### <date>" to target the post-section headers, not the metadata span line
+            # which also contains both dates (oldest ~ newest).
+            pos_new = content.find("### 2026-07-22")
+            pos_old = content.find("### 2026-01-01")
+            self.assertGreater(pos_new, 0, "new post section header must appear in file")
+            self.assertGreater(pos_old, 0, "old post section header must appear in file")
+            self.assertLess(pos_new, pos_old,
+                            "newest post section (2026-07-22) must appear before oldest (2026-01-01)")
+
+    def test_export_authors_report_auto_creates_by_author(self):
+        """report() must auto-create archive/by-author/index.md as standard output."""
+        uid = self.fixture["uid"]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            (output / "archive").mkdir(parents=True)
+            # Minimal posts.jsonl with one post for uid
+            posts = [{
+                "profile_uid": uid,
+                "author_name": "虚构研究员甲",
+                "feed_id": "AUTO-001",
+                "date": "2026-07-22",
+                "published_at": "2026-07-22T08:00:00+08:00",
+                "title": "",
+                "text": "测试帖子。",
+                "is_repost": False,
+                "is_column": False,
+                "symbols": [],
+                "metrics": {"likes": 0, "comments": 0, "reposts": 0, "views": 0},
+                "url": "https://q.futunn.com/feed/AUTO-001",
+                "original_author": None,
+                "original_text": None,
+            }]
+            FR.write_jsonl(output / "archive" / "posts.jsonl", posts)
+            # report() requires candidates.jsonl and claims.reviewed.jsonl (can be empty)
+            (output / "analysis").mkdir(parents=True)
+            FR.write_jsonl(output / "analysis" / "candidates.jsonl", [])
+            FR.write_jsonl(output / "analysis" / "claims.reviewed.jsonl", [])
+            (output / "analysis" / "market").mkdir(parents=True)
+            FR.write_jsonl(output / "analysis" / "market" / "claims_market.jsonl", [])
+
+            FR.report(argparse.Namespace(output=str(output)))
+
+            # Assertions inside the with block (tempdir is live)
+            index_path = output / "archive" / "by-author" / "index.md"
+            self.assertTrue(index_path.exists(),
+                            "report() must auto-create archive/by-author/index.md")
+            index_text = index_path.read_text(encoding="utf-8")
+            self.assertIn("虚构研究员甲", index_text,
+                          "index.md must list the author name")
+
+
+    # ------ BUG1: multiline original_text stays inside blockquote ------
+
+    def test_export_authors_multiline_original_text_blockquote(self):
+        """Multiline original_text in a repost must have every line prefixed with '> '."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            (output / "archive").mkdir()
+            uid = "55551111"
+            multiline_orig = "第一行内容。\n第二行内容。\n第三行内容。"
+            posts = [{
+                "profile_uid": uid,
+                "author_name": "测试博主",
+                "feed_id": "ML-001",
+                "date": "2026-07-22",
+                "published_at": "2026-07-22T08:00:00+08:00",
+                "title": "",
+                "text": "我的评论。",
+                "is_repost": True,
+                "is_column": False,
+                "symbols": [],
+                "metrics": {"likes": 0, "comments": 0, "reposts": 0, "views": 0},
+                "url": "https://q.futunn.com/feed/ML-001",
+                "original_author": "原作者",
+                "original_text": multiline_orig,
+            }]
+            FR.write_jsonl(output / "archive" / "posts.jsonl", posts)
+            FR.export_authors(argparse.Namespace(output=str(output)))
+
+            by_author = output / "archive" / "by-author"
+            author_file = next(f for f in by_author.glob("*.md") if f.name != "index.md")
+            content = author_file.read_text(encoding="utf-8")
+
+        # Every line of the original text must be prefixed with "> "
+        self.assertIn("> 第一行内容。", content, "first line of orig_text must have '> ' prefix")
+        self.assertIn("> 第二行内容。", content, "second line of orig_text must have '> ' prefix")
+        self.assertIn("> 第三行内容。", content, "third line of orig_text must have '> ' prefix")
+        # The raw unquoted second line must not appear (would happen without the fix)
+        lines = content.splitlines()
+        non_quoted_orig = [
+            ln for ln in lines
+            if "第二行内容" in ln and not ln.startswith(">")
+        ]
+        self.assertEqual(non_quoted_orig, [],
+                         "second line of orig_text must not appear outside blockquote")
+
+    # ------ BUG2: author name with | does not break index.md table ------
+
+    def test_export_authors_pipe_in_name_escaped_in_index(self):
+        """Author name containing '|' must be escaped in index.md table rows."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            (output / "archive").mkdir()
+            uid = "66662222"
+            posts = [{
+                "profile_uid": uid,
+                "author_name": "博主|分析|师",
+                "feed_id": "PIPE-001",
+                "date": "2026-07-22",
+                "published_at": "2026-07-22T08:00:00+08:00",
+                "title": "",
+                "text": "测试。",
+                "is_repost": False,
+                "is_column": False,
+                "symbols": [],
+                "metrics": {"likes": 0, "comments": 0, "reposts": 0, "views": 0},
+                "url": "https://q.futunn.com/feed/PIPE-001",
+                "original_author": None,
+                "original_text": None,
+            }]
+            FR.write_jsonl(output / "archive" / "posts.jsonl", posts)
+            FR.export_authors(argparse.Namespace(output=str(output)))
+
+            index_text = (output / "archive" / "by-author" / "index.md").read_text(
+                encoding="utf-8"
+            )
+
+        # The data row must contain escaped pipes so the table parses correctly
+        data_rows = [
+            ln for ln in index_text.splitlines()
+            if ln.startswith("| ") and "66662222" in ln
+        ]
+        self.assertEqual(len(data_rows), 1, "exactly one data row for this uid")
+        row = data_rows[0]
+        # Raw unescaped | inside cell content would split the column; check it's escaped
+        # The row starts with "| " — we check the author name cell contains \| not raw |
+        self.assertIn(r"\|", row,
+                      "pipe in author name must be escaped as \\| in the table row")
+        # The escaped name must appear, not the raw one breaking columns
+        self.assertIn(r"博主\|分析\|师", row,
+                      "escaped author name must appear verbatim in the data row")
 
 
 if __name__ == "__main__":

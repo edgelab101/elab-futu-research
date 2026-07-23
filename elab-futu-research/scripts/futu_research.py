@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 SCHEMA_VERSION = "1.0"
 LIST_URL = "https://q.futunn.com/nnq/personal-list"
 REPORT_FOOTER = (
@@ -2680,6 +2680,225 @@ def build_episode_candidates(
     return episodes
 
 
+def _safe_filename(name: str) -> str:
+    """Sanitize a string for use as a filesystem filename component.
+
+    Strips leading/trailing whitespace, then replaces filesystem-illegal
+    characters (/ \\ : * ? " < > |) and ASCII control characters (0x00-0x1f,
+    0x7f) with underscore.  Chinese characters and emoji are preserved.
+    Consecutive underscores are collapsed to a single one; leading/trailing
+    underscores are then stripped.  The result is truncated to 80 characters.
+    Returns "" when the sanitised result is empty — callers should substitute
+    "uid_<uid>" in that case.
+    """
+    cleaned = name.strip()
+    # Replace filesystem-illegal characters (POSIX and Windows)
+    cleaned = re.sub(r'[/\\:*?"<>|]', '_', cleaned)
+    # Replace ASCII control characters
+    cleaned = re.sub(r'[\x00-\x1f\x7f]', '_', cleaned)
+    # Collapse consecutive underscores
+    cleaned = re.sub(r'_+', '_', cleaned)
+    # Remove leading/trailing underscores produced by replacement
+    cleaned = cleaned.strip('_')
+    return cleaned[:80]
+
+
+def _export_authors_impl(output: Path, posts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Write per-author human-readable markdown archives to archive/by-author/.
+
+    Groups posts from posts.jsonl by profile_uid, writes one .md file per
+    author (newest post first) and an index.md summary table.  Idempotent:
+    repeated runs overwrite existing files; raw/ is never modified.
+
+    Args:
+        output: Research output root directory (contains archive/, raw/, etc.).
+        posts:  Already-loaded list of normalised post dicts.
+
+    Returns a summary dict with counts.
+    """
+    by_author_dir = output / "archive" / "by-author"
+    by_author_dir.mkdir(parents=True, exist_ok=True)
+
+    # Group posts by profile_uid (skip posts with no uid)
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for post in posts:
+        uid = str(post.get("profile_uid") or "")
+        if uid:
+            grouped[uid].append(post)
+
+    index_rows: List[Dict[str, Any]] = []
+
+    for uid in sorted(grouped):
+        author_posts = grouped[uid]
+
+        # Determine the most common non-empty author_name for this uid
+        name_counter: Counter = Counter(
+            str(p["author_name"])
+            for p in author_posts
+            if p.get("author_name")
+        )
+        author_name = name_counter.most_common(1)[0][0] if name_counter else ""
+
+        safe_name = _safe_filename(author_name) if author_name else ""
+        filename = f"{safe_name}_{uid}.md" if safe_name else f"uid_{uid}.md"
+
+        # Independent counts (is_column and is_repost are orthogonal flags)
+        orig_count = sum(1 for p in author_posts if not p.get("is_repost"))
+        col_count = sum(1 for p in author_posts if p.get("is_column"))
+        rep_count = sum(1 for p in author_posts if p.get("is_repost"))
+
+        # Time span from the date field (YYYY-MM-DD)
+        dates = sorted(str(p["date"]) for p in author_posts if p.get("date"))
+        date_span = f"{dates[0]} ~ {dates[-1]}" if dates else "—"
+
+        # Top 8 symbols across all posts for this author
+        sym_counter: Counter = Counter()
+        for p in author_posts:
+            for sym in (p.get("symbols") or []):
+                raw = sym.get("raw") if isinstance(sym, dict) else str(sym)
+                if raw:
+                    sym_counter[raw] += 1
+        top_symbols = ", ".join(
+            f"{sym}({cnt})" for sym, cnt in sym_counter.most_common(8)
+        ) or "—"
+
+        # Sort posts newest-first (reverse chronological)
+        sorted_posts = sorted(
+            author_posts,
+            key=lambda p: (
+                str(p.get("published_at") or p.get("date") or ""),
+                str(p.get("feed_id") or ""),
+            ),
+            reverse=True,
+        )
+
+        # OPT-B: strip ASCII control characters that would break markdown headings/tables
+        raw_display = author_name or f"UID {uid}"
+        display_name = re.sub(r"[\x00-\x1f\x7f]", "", raw_display)
+        lines: List[str] = [
+            f"# {display_name}",
+            "",
+            f"- **profile_uid**：{uid}",
+            f"- **主页**：https://q.futunn.com/profile/{uid}",
+            f"- **归档帖数**：原创 {orig_count} 条 / 专栏 {col_count} 条 / 转发 {rep_count} 条",
+            f"- **时间跨度**：{date_span}",
+            f"- **高频标的 Top 8**：{top_symbols}",
+            "",
+            "---",
+            "",
+        ]
+
+        for post in sorted_posts:
+            post_date = str(post.get("date") or "日期未知")
+            is_col = bool(post.get("is_column"))
+            is_rep = bool(post.get("is_repost"))
+
+            type_label = "专栏" if is_col else "动态"
+            if is_rep:
+                type_label += " · 转发"
+
+            lines.append(f"### {post_date} · {type_label}")
+            lines.append("")
+
+            title = str(post.get("title") or "").strip()
+            if title:
+                lines.append(f"**{title}**")
+                lines.append("")
+
+            text = str(post.get("text") or "").strip()
+            if text:
+                lines.append(text)
+                lines.append("")
+
+            # For reposts: show original author attribution and original text
+            if is_rep:
+                orig_author = post.get("original_author")
+                orig_text = str(post.get("original_text") or "").strip()
+                if orig_author or orig_text:
+                    if orig_author:
+                        lines.append(f"> 转自：{orig_author}")
+                    if orig_text:
+                        # Prefix every line so multiline content stays inside the blockquote
+                        lines.append("> " + orig_text.replace("\n", "\n> "))
+                    lines.append("")
+
+            # Meta line: symbols | engagement | canonical post link
+            symbols = [
+                (item.get("raw") if isinstance(item, dict) else str(item))
+                for item in (post.get("symbols") or [])
+            ]
+            sym_str = " / ".join(s for s in symbols if s) or "—"
+
+            metrics = post.get("metrics") or {}
+            likes = safe_int(metrics.get("likes"), 0)
+            comments = safe_int(metrics.get("comments"), 0)
+            feed_id = str(post.get("feed_id") or "")
+            post_url = str(
+                post.get("url")
+                or (f"https://q.futunn.com/feed/{feed_id}" if feed_id else "")
+            )
+
+            meta_parts = [f"标的：{sym_str}"]
+            if likes > 0 or comments > 0:
+                meta_parts.append(f"赞 {likes} / 评论 {comments}")
+            if post_url:
+                meta_parts.append(f"[原帖]({post_url})")
+
+            lines.append("- " + " | ".join(meta_parts))
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
+        atomic_write_text(by_author_dir / filename, "\n".join(lines))
+
+        index_rows.append({
+            "author_name": display_name,
+            "uid": uid,
+            "total": len(author_posts),
+            "orig_count": orig_count,
+            "col_count": col_count,
+            "rep_count": rep_count,
+            "date_span": date_span,
+            "filename": filename,
+        })
+
+    # Sort index by total posts descending, then uid for determinism
+    index_rows.sort(key=lambda r: (-r["total"], r["uid"]))
+
+    # Build index.md
+    index_lines: List[str] = [
+        "# 博主归档索引",
+        "",
+        "按作者拆分的可读归档，原始不可变证据在 `raw/`、机器分析在 `reports/`。",
+        "",
+        "| 作者 | UID | 帖数（原创/专栏/转发）| 时间跨度 | 归档文件 | 主页 |",
+        "|------|-----|---------------------|----------|----------|------|",
+    ]
+    for row in index_rows:
+        total_label = (
+            f"{row['total']}（{row['orig_count']} / {row['col_count']} / {row['rep_count']}）"
+        )
+        # BUG2: escape pipe chars in user-sourced text to prevent column splitting
+        safe_author = row["author_name"].replace("|", r"\|")
+        index_lines.append(
+            f"| {safe_author} | {row['uid']} | {total_label} | {row['date_span']} "
+            f"| [{row['filename']}]({row['filename']}) "
+            f"| [主页](https://q.futunn.com/profile/{row['uid']}) |"
+        )
+    index_lines.append("")
+
+    atomic_write_text(by_author_dir / "index.md", "\n".join(index_lines))
+
+    author_count = len(grouped)
+    log(f"Exported {author_count} author archive(s) to {by_author_dir}.")
+    return {
+        "authors": author_count,
+        "total_posts": len(posts),
+        "output_dir": str(by_author_dir),
+        "files": [row["filename"] for row in index_rows] + ["index.md"],
+    }
+
+
 def report(args: argparse.Namespace) -> Dict[str, Any]:
     output = Path(args.output).expanduser().resolve()
     posts_path = output / "archive" / "posts.jsonl"
@@ -2916,6 +3135,15 @@ def report(args: argparse.Namespace) -> Dict[str, Any]:
             ]
         )
     atomic_write_text(reports / "rule_cards.md", "\n".join(rule_lines) + REPORT_FOOTER)
+    # OPT-A: run export before writing the manifest so the manifest only lists
+    # archive/by-author/index.md when the file was actually written successfully.
+    report_files = [
+        "reports/profile.md",
+        "reports/capability_matrix.md",
+        "reports/rule_cards.md",
+    ]
+    _export_authors_impl(output, posts)
+    report_files.append("archive/by-author/index.md")
     summary = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": now_iso(),
@@ -2925,15 +3153,27 @@ def report(args: argparse.Namespace) -> Dict[str, Any]:
         "claims_or_candidates": len(claims),
         "market_rows": len(market_rows),
         "episode_candidates": len(episodes),
-        "files": [
-            "reports/profile.md",
-            "reports/capability_matrix.md",
-            "reports/rule_cards.md",
-        ],
+        "files": report_files,
     }
     atomic_write_json(reports / "report_manifest.json", summary)
     log(f"Reports generated in {reports} ({mode}).")
     return summary
+
+
+def export_authors(args: argparse.Namespace) -> Dict[str, Any]:
+    """Subcommand: export per-author readable markdown archives.
+
+    Reads archive/posts.jsonl and writes one .md file per author plus
+    archive/by-author/index.md.  Raises ResearchError if posts.jsonl is absent.
+    """
+    output = Path(args.output).expanduser().resolve()
+    posts_path = output / "archive" / "posts.jsonl"
+    if not posts_path.exists():
+        raise ResearchError(
+            f"No archive data found at {posts_path}. Run archive first."
+        )
+    posts = read_jsonl(posts_path)
+    return _export_authors_impl(output, posts)
 
 
 def audit(args: argparse.Namespace) -> Dict[str, Any]:
@@ -3373,6 +3613,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_archive_arguments(run_parser)
     run_parser.add_argument("--refresh-market", action="store_true")
+
+    export_authors_parser = subparsers.add_parser(
+        "export-authors",
+        help="Export per-author human-readable markdown archives from archive/posts.jsonl.",
+    )
+    export_authors_parser.add_argument(
+        "--output",
+        default="./futu-research-output",
+        help="Research output root directory (same as other subcommands).",
+    )
     return parser
 
 
@@ -3401,6 +3651,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 log(f"Market enrichment skipped with recorded warning: {error}")
             report(args)
             result = audit(args)
+        elif args.command == "export-authors":
+            result = export_authors(args)
         else:
             parser.error(f"Unknown command {args.command}")
             return 2
