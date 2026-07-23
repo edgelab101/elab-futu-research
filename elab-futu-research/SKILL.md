@@ -7,22 +7,30 @@ description: Archive public profiles from Futu (q.futunn.com) or Tiger (laohu8.c
 
 Turn one or more public profile URLs — Futu (q.futunn.com) or Tiger (laohu8.com) — into a resumable archive and an evidence-bounded research report. Make the default experience one-shot: accept the URL, choose safe defaults, run the workflow, and return the report plus audit status.
 
-Version: `1.3.0` · Last updated: `2026-07-23`
+Version: `1.3.1` · Last updated: `2026-07-23`
 
 ## Startup alignment (required)
 
-Before running any capture or producing any deliverable, align on the following four items. If the user's initial message already answers an item, **do not re-ask it** — simply acknowledge it in the summary line below.
+Before running any capture or producing any deliverable, align on the following items. If the user's initial message already answers an item, **do not re-ask it** — simply acknowledge it in the summary line below.
 
 Collect only what is still missing, in **one message** (not one question per item):
 
-1. **Research target** — which profile URL(s)? Supports q.futunn.com (Futu) and laohu8.com (Tiger). Pass a full laohu8.com URL for Tiger; a numeric UID defaults to Futu.
-2. **Time range** — default is all publicly visible history; echo this back explicitly even when the user did not specify ("全量历史" or the explicit window they gave).
-3. **Deliverables** — one or more of: ① 完整归档 ② 研究报告 ③ 多博主对比 ④ 规则卡 (multiple allowed).
-4. **Other constraints** — skip media, custom output directory, redaction needs, or anything else that changes the run.
+1. **Research target** — which profile URL(s)? If the user has not provided a URL, ask for it: this skill requires a `q.futunn.com/profile/<id>` or `laohu8.com/personal/<id>/` URL. Do not guess or substitute example UIDs. Supports q.futunn.com (Futu) and laohu8.com (Tiger). Pass a full laohu8.com URL for Tiger; a numeric UID defaults to Futu.
+2. **Time range** — **required explicit choice; no silent default to full history**. Ask the user to pick one of:
+   - 近半年 (`--since` six months ago)
+   - 近 1 年
+   - 近 18 个月
+   - 全量历史
+   Do not start full-history capture without the user explicitly choosing it. High-volume bloggers (thousands of posts) can take a very long time to capture in full (example: a blogger with 10 000+ posts may require hours of run time and produce hundreds of MB of output); recommend a bounded window for first runs.
+3. **探量给预期** — before launching any full-history or unknown-volume capture, run `doctor --profile <url>` (or fetch the first list page) first to obtain the post count signal (`sample_post_count`; the profile page also shows dynamic/column totals). Report a concrete estimate to the user — e.g., "这个博主约 N 帖，全量约 X 小时/MB，近 1 年约 Y 帖" — and let the user confirm the window before proceeding. This step is mandatory before full-history or unknown-volume captures; it may be skipped only when the user has already selected and confirmed a bounded time window.
+4. **Deliverables** — one or more of: ① 完整归档 ② 研究报告 ③ 多博主对比 ④ 规则卡 (multiple allowed).
+5. **Other constraints** — skip media, custom output directory, redaction needs, or anything else that changes the run.
 
-Once all four items are known, reply with **one summary line** before issuing any command:
+Once all items are known, reply with **one summary line** before issuing any command:
 
 > 博主 \<X\> · 范围 \<Y\> · 交付 \<Z\> · 输出目录 \<W\> · elab-futu-research by 杰尼马（EdgeLab）
+
+\<Y\> must be the user-confirmed specific window (e.g., "近 1 年（2025-07-23 起）") — not "全量历史" without explicit user confirmation.
 
 Then proceed with the workflow.
 
@@ -49,6 +57,17 @@ Locate the script before running. The path depends on how the skill was installe
 | Claude Code | `~/.claude/skills/elab-futu-research/scripts/futu_research.py` |
 | Codex | `~/.codex/skills/elab-futu-research/scripts/futu_research.py` |
 | Repo clone | `elab-futu-research/scripts/futu_research.py` (run from repo root) |
+| Other / unknown | clone the repo, then use `elab-futu-research/scripts/futu_research.py` from the repo root |
+
+If you are unsure which path applies, run the following to auto-detect:
+
+```bash
+python3 ~/.claude/skills/elab-futu-research/scripts/futu_research.py --help 2>/dev/null \
+  || python3 ~/.codex/skills/elab-futu-research/scripts/futu_research.py --help 2>/dev/null \
+  || python3 elab-futu-research/scripts/futu_research.py --help
+```
+
+All `references/` paths are relative to the skill installation directory, not the `--output` output directory.
 
 All commands below use the relative form `scripts/futu_research.py`; substitute the full prefix from the table above when running outside the skill directory.
 
@@ -66,7 +85,7 @@ python3 scripts/futu_research.py run \
   --output "./futu-research-output"
 ```
 
-`run` is a machine-only exploratory pipeline: it executes all steps in sequence and marks every output as `exploratory`. Human claim review (step 3) can be performed after `run` completes; re-run `market` and `report` afterwards to incorporate reviewed decisions. To enforce the claim-freeze gate strictly — no outcome data visible before claims are frozen — run the steps individually in the order documented below. Both modes are valid; choose based on whether human review happens before or after outcome enrichment.
+`run` is a machine-only exploratory pipeline: it executes all steps in sequence and marks every output as `exploratory`. Human claim review (step 3) can be performed after `run` completes; re-run `market` and `report` afterwards to incorporate reviewed decisions. To enforce the claim-freeze gate strictly — no outcome data visible before claims are frozen — run the steps individually in the order documented below. **Default: use `run`** for the full automatic pipeline; outputs are labeled `exploratory` and claim review can follow. Switch to step-by-step mode only when the user explicitly requires "no outcome data visible before claims are frozen" (strict no-time-travel).
 
 For multiple bloggers, repeat `--profile`. Optional `--since YYYY-MM-DD` and `--until YYYY-MM-DD` limit the archive. Use `--media none` (or legacy alias `--skip-media`) to skip media; `--media evidence` limits downloads to posts matching order-evidence keywords.
 
@@ -84,6 +103,8 @@ python3 scripts/futu_research.py doctor \
 `--profile` is optional for `doctor`: without it, only local environment checks run and the overall status is reported as `PARTIAL` (endpoint checks skipped).
 
 ## Workflow
+
+All steps use the same `<dir>` (default `./futu-research-output`); keep it unchanged for the entire session.
 
 ### 1. Capture and normalize
 
@@ -124,7 +145,7 @@ Trailing tag noise reduction: if a post ends with ≥3 consecutive `$symbol$` ta
 
 ### 3. Review before outcomes
 
-Read `analysis/candidates.jsonl`, the cited post text, and relevant images. Write reviewed decisions to `analysis/claims.reviewed.jsonl` using `references/data-schema.md`.
+Read `analysis/candidates.jsonl`, the cited post text, and relevant images. Write reviewed decisions to `analysis/claims.reviewed.jsonl` following the Reviewed claim section in `references/data-schema.md`. Required fields: `claim_id`, `feed_id`, `evidence_level`, `evidence_span`, `direction`, `published_at`, `reviewer`, `reviewed_at`.
 
 Freeze each claim before fetching or inspecting forward returns. Record:
 
@@ -144,7 +165,7 @@ python3 scripts/futu_research.py market --output "<dir>"
 
 The context cutoff is the last completed daily bar known at post time. Evaluation begins at the next tradable daily open. Keep symbol mappings in `analysis/symbol_overrides.json`; unresolved mappings remain unresolved.
 
-Use 1/5/20/60-session forward paths, MFE, MAE, and benchmark-relative returns when data are available. Do not fabricate option returns from an underlying chart.
+Use 1/5/20/60-session forward paths, MFE (Maximum Favorable Excursion), MAE (Maximum Adverse Excursion), and benchmark-relative returns when data are available; MFE and MAE are direction-aware (see `references/analysis-method-v1.md`). Do not fabricate option returns from an underlying chart.
 
 ### 5. Build reports
 
@@ -163,6 +184,8 @@ Read `references/analysis-method-v1.md` before writing final judgments. Produce:
 - transferable rule cards for the user.
 
 Do not diagnose personality or mental illness. Do not turn the report into a follow-trading recommendation. Separate author claims, observed public execution evidence, market outcomes, and inference.
+
+If `qa/adversarial_audit.json` top-level `status` is `FAIL`, do not deliver any final research conclusions; report the missing coverage areas to the user and stop. If `status` is `WARN`, the report may be delivered but must annotate every identified gap.
 
 ## Output contract
 
