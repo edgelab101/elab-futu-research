@@ -1,5 +1,6 @@
 ---
 name: elab-futu-research
+invocation: user
 description: Archive public profiles from Futu (q.futunn.com) or Tiger (laohu8.com): save visible dynamics and posts, columns (Futu only), raw evidence and media (Futu only), enrich time-frozen claims with market context, compare trading behavior across regimes, and generate auditable blogger research. Dispatcher routes by URL domain — full laohu8.com URL → Tiger; numeric UID or q.futunn.com URL → Futu. Use when a user provides one or more q.futunn.com or laohu8.com profile URLs or asks to crawl, save, review, compare, or analyze Futu or Tiger bloggers, posts, trading style, discipline, tone, or historical calls.
 ---
 
