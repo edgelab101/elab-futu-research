@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0 — 2026-07-23
+
+Added:
+
+- `--media {all,none,evidence}` flag (default `all`). `evidence` mode downloads media only from posts whose title or text matches built-in `EVIDENCE_MEDIA_KEYWORDS` (订单/成交/持仓/清仓/盈亏/对账单/order/filled/position/pnl etc.), useful for order-screenshot bloggers. `--skip-media` is retained as an alias for `--media none`; when both are supplied, `--media` takes precedence with a warning.
+- Trailing tag noise reduction in `prepare`: consecutive ≥3 `$symbol$` tag blocks at the end of a post where the symbol was not discussed in the body are downgraded to `D` (mention only) and excluded from directional claim scoring. Addresses cases where up to 73% of candidates in some archives were pure exposure-tag artefacts.
+
+Changed:
+
+- Audit uniqueness now keyed on `(profile_uid, feed_id)` instead of `feed_id` alone, eliminating false-positive `error` reports when post A reposts post B and both appear in a multi-blogger archive (6 bloggers, 7 collisions all of this type in real testing).
+- Media tripwire denominator changed from `posts` to `posts_with_image_content`; text-only bloggers no longer trigger spurious WARN. Posts skipped by `--media none` are marked `skipped_by_mode`; posts that have image content but produced 0 media tasks still emit WARN.
+
+Fixed:
+
+- `_repost_original_obj` empty-structure guard: a non-empty `dict` with both `richTextItems` and `pictureItems` absent is no longer classified as a repost.
+
 ## 1.1.2 — 2026-07-22
 
 Fixed:

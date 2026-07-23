@@ -2,23 +2,26 @@
 
 ## 做到哪了
 
-- `elab-futu-research` 1.1.2 已完成，分支 `fix/v1.1.2-stress-test-fixes`。
-- 修复 1（install.sh 备份目录污染）：备份改到 `~/.elab-futu-research-backups/<agent>-<ts>/`，
-  不再落在 skills 目录内；最多保留 3 份，自动清理旧备份；bash 3.2 兼容（无 mapfile）。
-- 修复 2（README 粉丝说明）：新增"环境要求"（macOS/Linux/Windows bash/Python 3.9+/无依赖）、
-  "账号安全 FAQ"（不登录/不读 Cookie/保守限速/--since 建议/遇验证码行为）、
-  "产出物使用边界"（自用可以/完整归档不公开分发/分享脱敏/不构成投资建议）。
-- 修复 3（样例报告）：`docs/sample-report.md` 全虚构数据，展示能力矩阵/市场状态分析/
-  规则卡/证据分级/失败清单/完整性说明各一节；顶部标注"虚构数据演示"。
-- 修复 4（压测批）：OSError 人话报错 + exit 2；archive 0 帖追加 UID 提示；doctor 无 --profile
-  → PARTIAL；CN_TZ ZoneInfo fallback UTC+8（Windows 无 tzdata 不再崩）；裸 5 位数字 symbol
-  → HK；report/market/audit 空目录明确报错并引导；REPORT_FOOTER 署名更新；Python 3.9 版本守卫；
-  install.sh BASH_SOURCE zsh 兼容 + 时间戳防碰撞。
-- 版本号已更新：SKILL.md / futu_research.py VERSION / CHANGELOG.md / CURRENT.md。
+- `elab-futu-research` 1.2.0 已完成，分支 `feat/v1.2.0-evidence-media-and-claim-quality`。
+- 新增 `--media {all,none,evidence}` 三档模式：`evidence` 只下载命中证据关键词帖子的媒体；
+  `--skip-media` 保留为 `--media none` 别名，两者同给时 `--media` 优先并警告。
+- 审计判重改为 `(profile_uid, feed_id)` 组合键，消除多博主归档中转发碰撞误报（实测 6 博主 7 例）。
+- `_repost_original_obj` 空结构守卫：非空 dict 但 richTextItems/pictureItems 均空时不判转发。
+- 媒体 tripwire 分母改 `posts_with_image_content`：纯文字博主不误报；`--media none` 标
+  `skipped_by_mode`；有图但 0 媒体任务仍 WARN。
+- `prepare` 尾部标签消噪：帖末连续 ≥3 个 `$symbol$` 标签且正文未讨论的 symbol 降为 D 级，
+  不进方向性 claim（实测某港股博主 73% claim 为曝光标签，修复后显著改善）。
+- 版本号已更新：SKILL.md / futu_research.py VERSION / CHANGELOG.md / CURRENT.md /
+  docs/sample-report.md / README.md。
 
-## 下一步
+## Known Limitation
 
-- v1.2.0 待办：① `_repost_original_obj` 对"非空 dict 但 richTextItems/pictureItems 均空"的边界加守卫，防真原创被误判转发；② tripwire 改用 `posts_with_images` 计数做守卫，消除纯文字博主的审计误报；③ `feed_index.json` 并发同目录写无文件锁——因 `fcntl` 不跨 Windows 且场景低频，本批评估后决策推迟，标记为 known limitation，v1.2.0 再议。
+- `feed_index.json` 并发同目录写无文件锁——`fcntl` 不跨 Windows 且场景低频，推迟决策，
+  v1.3.0 再议。
+
+## 使用注记
+
+- 订单截图型博主（图多但标题无关键词）建议重抓时加 `--media evidence`，可大幅降低下载量同时保留取证图片。
 
 ## 基线验证
 

@@ -7,7 +7,7 @@ description: Archive a Futu/Moomoo public profile's visible dynamics and columns
 
 Turn one or more public Futu profile URLs into a resumable archive and an evidence-bounded research report. Make the default experience one-shot: accept the URL, choose safe defaults, run the workflow, and return the report plus audit status.
 
-Version: `1.1.2` · Last updated: `2026-07-22`
+Version: `1.2.0` · Last updated: `2026-07-23`
 
 ## Startup alignment (required)
 
@@ -34,7 +34,7 @@ Then proceed with the workflow.
   - dynamics/all (`type=301`)
   - columns (`type=302`)
 - Preserve original posts and reposts. Exclude reposts from ability scoring by default, but keep them searchable.
-- Download public post media unless the user opts out.
+- Download public post media in three modes: `all` (default), `none` (skip), `evidence` (only posts matching built-in order/fill/position evidence keywords — recommended for order-screenshot bloggers). `--skip-media` is retained as an alias for `--media none`.
 - Write to `./futu-research-output/` unless the user names another directory.
 - Resume safely from cached pages/details/media. Never delete raw evidence; rebuild derived files atomically.
 - Use conservative request rates. Stop and report interface drift, login, CAPTCHA, or access denial; do not bypass access controls.
@@ -60,7 +60,7 @@ python3 scripts/futu_research.py run \
 
 `run` is a machine-only exploratory pipeline: it executes all steps in sequence and marks every output as `exploratory`. Human claim review (step 3) can be performed after `run` completes; re-run `market` and `report` afterwards to incorporate reviewed decisions. To enforce the claim-freeze gate strictly — no outcome data visible before claims are frozen — run the steps individually in the order documented below. Both modes are valid; choose based on whether human review happens before or after outcome enrichment.
 
-For multiple bloggers, repeat `--profile`. Optional `--since YYYY-MM-DD` and `--until YYYY-MM-DD` limit the archive. Use `--skip-media` only when requested.
+For multiple bloggers, repeat `--profile`. Optional `--since YYYY-MM-DD` and `--until YYYY-MM-DD` limit the archive. Use `--media none` (or legacy alias `--skip-media`) to skip media; `--media evidence` limits downloads to posts matching order-evidence keywords.
 
 Run the environment and endpoint check first when the interface may have changed:
 
@@ -107,6 +107,8 @@ Use these evidence levels:
 - `D`: mention, repost, joke, question, or attention only.
 
 Never infer a holding from `C` or `D`. The script never assigns `A` automatically.
+
+Trailing tag noise reduction: if a post ends with ≥3 consecutive `$symbol$` tag blocks and a symbol does not appear in the body text, the script downgrades those mentions to `D` and excludes them from directional claim scoring.
 
 ### 3. Review before outcomes
 
