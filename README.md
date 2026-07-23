@@ -217,6 +217,10 @@ python3 -m unittest discover -s tests
 
 样例报告（虚构数据）：[docs/sample-report.md](docs/sample-report.md)
 
+样例概览卡（虚构数据）：[docs/sample-card.png](docs/sample-card.png) · 源文件 [docs/sample-card.html](docs/sample-card.html)
+
+![样例概览卡](docs/sample-card.png)
+
 ## 许可与声明
 
 采用 CC BY-NC 4.0：允许署名分享和修改，不允许商业售卖或打包进收费产品。
