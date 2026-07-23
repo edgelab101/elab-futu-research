@@ -376,8 +376,8 @@ class PipelineTest(unittest.TestCase):
 
     # ------ F5: version ------
     def test_version_string(self):
-        """VERSION constant must be bumped to 1.2.1 (F6/export-authors release)."""
-        self.assertEqual(FR.VERSION, "1.2.1")
+        """VERSION constant must be bumped to 1.3.0 (TigerAdapter release)."""
+        self.assertEqual(FR.VERSION, "1.3.0")
 
     # ------ F1: OSError in main exits 2 cleanly ------
     def test_output_file_path_exits_cleanly(self):
@@ -1459,6 +1459,712 @@ class PipelineTest(unittest.TestCase):
         # The escaped name must appear, not the raw one breaking columns
         self.assertIn(r"博主\|分析\|师", row,
                       "escaped author name must appear verbatim in the data row")
+
+
+    # ------ Stage A: capture-adapter interface ------
+
+    def test_select_adapter_futu_url(self):
+        """select_adapter routes q.futunn.com profile URLs to FutuAdapter."""
+        adapter = FR.select_adapter("https://q.futunn.com/profile/12345678")
+        self.assertEqual(adapter.name, "futu")
+
+    def test_select_adapter_numeric_uid(self):
+        """select_adapter routes bare numeric UIDs to FutuAdapter (default platform)."""
+        adapter = FR.select_adapter("12345678")
+        self.assertEqual(adapter.name, "futu")
+
+    def test_select_adapter_laohu8_routes_to_tiger(self):
+        """select_adapter routes laohu8.com URLs to TigerAdapter (Stage B now supported)."""
+        adapter = FR.select_adapter("https://www.laohu8.com/personal/12345")
+        self.assertEqual(adapter.name, "tiger")
+
+    def test_select_adapter_nonsense_raises(self):
+        """select_adapter raises ResearchError for completely unrecognized input."""
+        with self.assertRaises(FR.ResearchError):
+            FR.select_adapter("not-a-valid-platform-url")
+
+    def test_futu_adapter_resolve_uid(self):
+        """FutuAdapter.resolve_uid handles q.futunn.com URLs, bare numeric UIDs, and rejects junk."""
+        adapter = FR.FutuAdapter()
+        uid = self.fixture["uid"]
+        # Bare numeric UID passthrough
+        self.assertEqual(adapter.resolve_uid(uid), uid)
+        # Full profile URL with query params
+        self.assertEqual(
+            adapter.resolve_uid(f"https://q.futunn.com/profile/{uid}?lang=zh-cn"),
+            uid,
+        )
+        # Invalid input must raise ResearchError
+        with self.assertRaises(FR.ResearchError):
+            adapter.resolve_uid("not-a-uid")
+
+    # ------ Tiger adapter: routing and UID resolution ------
+
+    def test_tiger_adapter_matches_laohu8_url(self):
+        """TigerAdapter.matches() returns True for laohu8.com URLs."""
+        adp = FR.TigerAdapter()
+        self.assertTrue(adp.matches("https://www.laohu8.com/personal/98765/"))
+        self.assertTrue(adp.matches("http://laohu8.com/personal/123"))
+        self.assertTrue(adp.matches("laohu8.com/personal/555"))
+
+    def test_tiger_adapter_does_not_match_numeric_uid(self):
+        """TigerAdapter.matches() returns False for bare numeric UIDs (Futu default)."""
+        adp = FR.TigerAdapter()
+        self.assertFalse(adp.matches("12345678"))
+        self.assertFalse(adp.matches("98765"))
+        self.assertFalse(adp.matches("https://q.futunn.com/profile/12345"))
+
+    def test_tiger_adapter_resolve_uid_from_url(self):
+        """TigerAdapter.resolve_uid() extracts the numeric UID from laohu8.com/personal/."""
+        adp = FR.TigerAdapter()
+        self.assertEqual(adp.resolve_uid("https://www.laohu8.com/personal/98765/"), "98765")
+        self.assertEqual(adp.resolve_uid("https://www.laohu8.com/personal/111222333"), "111222333")
+        # Bad URL without /personal/ raises ResearchError
+        with self.assertRaises(FR.ResearchError):
+            adp.resolve_uid("https://www.laohu8.com/user/12345")
+        with self.assertRaises(FR.ResearchError):
+            adp.resolve_uid("not-a-url-at-all")
+
+    def test_tiger_adapter_profile_url(self):
+        """TigerAdapter.profile_url() constructs the canonical personal page URL."""
+        adp = FR.TigerAdapter()
+        self.assertEqual(adp.profile_url("12345"), "https://www.laohu8.com/personal/12345/")
+
+    # ------ Tiger list page parsing ------
+
+    # Minimal SSR HTML that mimics the laohu8.com personal page structure.
+    TIGER_LIST_HTML = """
+<html><body>
+<div class="tweet-item">
+  <a href="/post/9000001">link</a>
+  <span class="publish-time">·</span>
+  <span class="publish-time">12:30</span>
+  <a href="/post/9000001">link2</a>
+</div>
+<div class="tweet-item">
+  <a href="/post/9000002">link</a>
+  <span class="publish-time">·</span>
+  <span class="publish-time">07-20 09:15</span>
+  <a href="/post/9000002">link2</a>
+</div>
+<div class="tweet-item">
+  <a href="/post/9000003">link</a>
+  <span class="publish-time">·</span>
+  <span class="publish-time">2024-12-01</span>
+  <a href="/post/9000003">link2</a>
+</div>
+</body></html>
+"""
+
+    def test_tiger_list_parse_post_ids_and_cursor(self):
+        """_parse_list_page extracts deduplicated post IDs and computes min-id cursor."""
+        from datetime import date
+        adp = FR.TigerAdapter()
+        today = date(2025, 7, 20)
+        post_ids, time_map, cursor = adp._parse_list_page(self.TIGER_LIST_HTML, today)
+        # Should have exactly 3 unique IDs (each appears twice in HTML)
+        self.assertEqual(post_ids, ["9000001", "9000002", "9000003"])
+        # Cursor is str(min(post_id))
+        self.assertEqual(cursor, "9000001")
+
+    def test_tiger_list_parse_publish_time_mapping(self):
+        """_parse_list_page maps post IDs to their raw publish-time strings."""
+        from datetime import date
+        adp = FR.TigerAdapter()
+        today = date(2025, 7, 20)
+        _, time_map, _ = adp._parse_list_page(self.TIGER_LIST_HTML, today)
+        self.assertEqual(time_map["9000001"], "12:30")
+        self.assertEqual(time_map["9000002"], "07-20 09:15")
+        self.assertEqual(time_map["9000003"], "2024-12-01")
+
+    def test_tiger_list_parse_bullet_separator_filtered(self):
+        """_parse_list_page filters out '·' separator spans from time_map."""
+        from datetime import date
+        adp = FR.TigerAdapter()
+        today = date(2025, 7, 20)
+        _, time_map, _ = adp._parse_list_page(self.TIGER_LIST_HTML, today)
+        # Values must never be the bullet separator
+        for pid, raw in time_map.items():
+            self.assertNotIn(raw, ("·", "·", "·", "•", "·"),
+                             f"Bullet separator leaked into time_map for post {pid}")
+
+    def test_tiger_publish_time_formats(self):
+        """_parse_publish_time handles the four time formats used by laohu8.com."""
+        from datetime import date, datetime, timezone
+        adp = FR.TigerAdapter()
+        crawl_date = date(2025, 7, 20)
+
+        # HH:MM (same-day post)
+        dt, iso = adp._parse_publish_time("12:30", crawl_date)
+        self.assertIsNotNone(dt)
+        self.assertTrue(iso.startswith("2025-07-20T12:30"))
+
+        # MM-DD HH:MM (earlier this year with time)
+        dt, iso = adp._parse_publish_time("03-15 09:00", crawl_date)
+        self.assertIsNotNone(dt)
+        self.assertTrue(iso.startswith("2025-03-15T09:00"))
+
+        # YYYY-MM-DD (older post with explicit year)
+        dt, iso = adp._parse_publish_time("2024-12-01", crawl_date)
+        self.assertIsNotNone(dt)
+        self.assertTrue(iso.startswith("2024-12-01"))
+
+        # MM-DD only (current year, no time)
+        dt, iso = adp._parse_publish_time("06-15", crawl_date)
+        self.assertIsNotNone(dt)
+        self.assertTrue(iso.startswith("2025-06-15"))
+
+        # Empty / unrecognised → (None, None)
+        dt_none, iso_none = adp._parse_publish_time("", crawl_date)
+        self.assertIsNone(dt_none)
+        self.assertIsNone(iso_none)
+
+        dt_none2, iso_none2 = adp._parse_publish_time("invalid-time", crawl_date)
+        self.assertIsNone(dt_none2)
+        self.assertIsNone(iso_none2)
+
+    # ------ Tiger detail page parsing ------
+
+    TIGER_DETAIL_HTML = """
+<html><head>
+  <meta property="og:title" content="Fallback OG Title" />
+</head><body>
+<h2 class="post-title">Tiger Post Title &amp; More</h2>
+<div class="post-author">
+  <a href="/personal/55555/" title="TigerAuthor">TigerAuthor</a>
+</div>
+<span class="post-time">07-19 10:23</span>
+<article class="post-article article-content-wrapper">
+  <p>First paragraph text.</p>
+  <p>Second paragraph with &lt;symbols&gt; and entities.</p>
+  <div>Nested div content.</div>
+</article>
+</body></html>
+"""
+
+    def test_tiger_detail_parse_title_text_author(self):
+        """_parse_detail_page extracts title, author name/uid, and article text."""
+        adp = FR.TigerAdapter()
+        detail = adp._parse_detail_page(self.TIGER_DETAIL_HTML, "888001", "07-19 10:23")
+        self.assertEqual(detail["source"], "tiger")
+        self.assertEqual(detail["post_id"], "888001")
+        # Title from h2.post-title (HTML entities decoded)
+        self.assertEqual(detail["title"], "Tiger Post Title & More")
+        # Author from post-author block
+        self.assertEqual(detail["author_name"], "TigerAuthor")
+        self.assertEqual(detail["author_uid"], "55555")
+        # Publish time from list preserved in the detail dict
+        self.assertEqual(detail["publish_time_list"], "07-19 10:23")
+        # Article text extracted (not empty)
+        self.assertIn("First paragraph text.", detail["text"])
+        self.assertIn("Second paragraph", detail["text"])
+
+    def test_tiger_html_robustness_entities_and_symbols(self):
+        """_parse_detail_page decodes HTML entities and handles nested tags in article."""
+        adp = FR.TigerAdapter()
+        html_with_entities = """
+<html><body>
+<h2 class="post-title">Title &amp; &#60;Test&#62;</h2>
+<div class="post-author">
+  <a href="/personal/77777/" title="AuthorX">AuthorX</a>
+</div>
+<span class="post-time">2025-01-10</span>
+<article class="post-article article-content-wrapper">
+  <p>Text with &amp; entity and &#169; copyright.</p>
+  <p>NVDA $TSLA $AAPL mentioned.</p>
+</article>
+</body></html>
+"""
+        detail = adp._parse_detail_page(html_with_entities, "999001", "")
+        # h2 title decoded
+        self.assertEqual(detail["title"], "Title & <Test>")
+        # Article text has entity decoded
+        self.assertIn("&", detail["text"])
+        self.assertIn("©", detail["text"])
+
+    def test_tiger_normalize_post_schema_fields(self):
+        """normalize_post() produces all required schema fields for a Tiger detail file."""
+        import tempfile
+        import json
+        from pathlib import Path
+
+        adp = FR.TigerAdapter()
+        tiger_detail = {
+            "source": "tiger",
+            "post_id": "5551234",
+            "author_name": "John Tiger",
+            "author_uid": "9990001",
+            "title": "My Tiger Post",
+            "text": "Content about NVDA and TSLA.",
+            "publish_time_list": "07-15 11:00",
+            "publish_time_detail": "11:00",
+            "url": "https://www.laohu8.com/post/5551234",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            detail_path = Path(tmp) / "5551234.json"
+            detail_path.write_text(json.dumps(tiger_detail), encoding="utf-8")
+
+            record = adp.normalize_post(
+                path=detail_path,
+                uid="9990001",
+                stream_membership=["all"],
+                media_by_feed={},
+                profile_url_str="https://www.laohu8.com/personal/9990001/",
+            )
+
+        # Core identity fields
+        self.assertEqual(record["schema_version"], FR.SCHEMA_VERSION)
+        self.assertEqual(record["feed_id"], "5551234")
+        self.assertEqual(record["author_uid"], "9990001")
+        self.assertEqual(record["profile_uid"], "9990001")
+        self.assertEqual(record["author_name"], "John Tiger")
+        self.assertEqual(record["title"], "My Tiger Post")
+        self.assertIn("NVDA", record["text"])
+        # Required schema keys must all be present
+        required_keys = [
+            "schema_version", "feed_id", "author_uid", "profile_uid", "author_name",
+            "published_at", "published_at_raw", "date", "month", "stream_membership",
+            "is_column", "is_repost", "is_original_author", "feed_type", "content_type",
+            "profile_action", "title", "text", "original_text", "original_author",
+            "symbols", "inferred_symbols", "topics", "metrics", "images", "url",
+            "source", "parse_warnings",
+        ]
+        for key in required_keys:
+            self.assertIn(key, record, f"normalize_post() missing field: {key}")
+        # Tiger-specific invariants
+        self.assertFalse(record["is_column"])
+        self.assertFalse(record["is_repost"])
+        self.assertTrue(record["is_original_author"])
+        self.assertEqual(record["symbols"], [])
+        self.assertEqual(record["images"], [])
+        self.assertIsInstance(record["inferred_symbols"], list)
+        # Metrics present as dict
+        self.assertIsInstance(record["metrics"], dict)
+
+    def test_tiger_normalize_post_rejects_non_tiger_file(self):
+        """normalize_post() raises ResearchError for files that are not Tiger detail JSON."""
+        import tempfile
+        import json
+        from pathlib import Path
+
+        adp = FR.TigerAdapter()
+        with tempfile.TemporaryDirectory() as tmp:
+            # File with wrong source field
+            bad_path = Path(tmp) / "bad.json"
+            bad_path.write_text(json.dumps({"source": "futu", "post_id": "1"}), encoding="utf-8")
+            with self.assertRaises(FR.ResearchError):
+                adp.normalize_post(bad_path, "uid1", ["all"], {}, "")
+            # Non-JSON file
+            junk_path = Path(tmp) / "junk.json"
+            junk_path.write_text("not valid json", encoding="utf-8")
+            with self.assertRaises(FR.ResearchError):
+                adp.normalize_post(junk_path, "uid1", ["all"], {}, "")
+
+    def test_tiger_select_adapter_and_futu_numeric_zero_regression(self):
+        """Bare numeric UIDs still route to FutuAdapter; laohu8 URLs route to TigerAdapter."""
+        futu_adapter = FR.select_adapter("987654321")
+        self.assertEqual(futu_adapter.name, "futu")
+
+        tiger_adapter = FR.select_adapter("https://www.laohu8.com/personal/123456789/")
+        self.assertEqual(tiger_adapter.name, "tiger")
+
+        # Futu URL still routes to Futu
+        futu_url_adapter = FR.select_adapter("https://q.futunn.com/profile/11223344")
+        self.assertEqual(futu_url_adapter.name, "futu")
+
+    # ------ BUG1: Tiger symbol extraction from $中文名(CODE)$ format ------
+
+    def test_tiger_extract_symbols_chinese_label_with_ticker(self):
+        """_tiger_extract_symbols extracts CODE from $中文名(CODE)$ parenthesised format."""
+        text = "看好 $特斯拉(TSLA)$ 和 $SpaceX(SPCX)$ 的走势。"
+        symbols = FR._tiger_extract_symbols(text)
+        codes = [s.get("raw", "").upper() for s in symbols]
+        self.assertIn("TSLA", codes, "TSLA should be extracted from $特斯拉(TSLA)$")
+        self.assertIn("SPCX", codes, "SPCX should be extracted from $SpaceX(SPCX)$")
+
+    def test_tiger_extract_symbols_plain_dollar_code(self):
+        """_tiger_extract_symbols extracts CODE from plain $CODE$ format (no parens)."""
+        text = "这是 $NVDA$ 和 $AAPL$ 的对比分析。"
+        symbols = FR._tiger_extract_symbols(text)
+        codes = [s.get("raw", "").upper() for s in symbols]
+        self.assertIn("NVDA", codes, "NVDA should be extracted from $NVDA$")
+        self.assertIn("AAPL", codes, "AAPL should be extracted from $AAPL$")
+
+    def test_tiger_extract_symbols_paren_takes_priority_over_plain(self):
+        """When both $中文名(CODE)$ and $CODE$ appear, paren format wins; no duplication."""
+        # $TSLA$ also appears but $特斯拉(TSLA)$ is the canonical tag
+        text = "$特斯拉(TSLA)$ 最近表现强劲，也有人直接写 $TSLA$ 来表示。"
+        symbols = FR._tiger_extract_symbols(text)
+        codes = [s.get("raw", "").upper() for s in symbols]
+        # TSLA appears once — deduplication must hold
+        self.assertEqual(codes.count("TSLA"), 1, "TSLA must not be duplicated")
+        self.assertIn("TSLA", codes)
+
+    def test_tiger_normalize_post_symbols_populated_from_tags(self):
+        """normalize_post() populates symbols[] from $...(CODE)$ tags in Tiger post text."""
+        import tempfile
+        import json
+        from pathlib import Path
+
+        adp = FR.TigerAdapter()
+        tiger_detail = {
+            "source": "tiger",
+            "post_id": "7771234",
+            "author_name": "TigerUser",
+            "author_uid": "9990002",
+            "title": "看好 $特斯拉(TSLA)$ 的走势",
+            "text": "$SpaceX(SPCX)$ 下周有重要发射，$NVDA$ 也可以关注。",
+            "publish_time_list": "07-22 09:00",
+            "publish_time_detail": "",
+            "url": "https://www.laohu8.com/post/7771234",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            detail_path = Path(tmp) / "7771234.json"
+            detail_path.write_text(json.dumps(tiger_detail), encoding="utf-8")
+            record = adp.normalize_post(
+                path=detail_path,
+                uid="9990002",
+                stream_membership=["tiger-all"],
+                media_by_feed={},
+                profile_url_str="https://www.laohu8.com/personal/9990002/",
+            )
+        sym_codes = {s.get("raw", "").upper() for s in record["symbols"]}
+        self.assertIn("TSLA", sym_codes, "TSLA from $特斯拉(TSLA)$ must appear in symbols")
+        self.assertIn("SPCX", sym_codes, "SPCX from $SpaceX(SPCX)$ must appear in symbols")
+        self.assertIn("NVDA", sym_codes, "NVDA from $NVDA$ must appear in symbols")
+        # symbols list must not be empty (the original BUG1 symptom)
+        self.assertGreater(len(record["symbols"]), 0, "symbols must not be empty for tagged posts")
+
+    # ------ BUG2: expected_streams_present audit check ------
+
+    def _make_tiger_crawl_audit(self, tmp_dir: Path, uid: str) -> None:
+        """Write a minimal Tiger-style crawl_audit.json with single 'tiger-all' stream."""
+        qa = tmp_dir / "qa"
+        qa.mkdir(parents=True, exist_ok=True)
+        crawl_audit = {
+            "schema_version": FR.SCHEMA_VERSION,
+            "status": "PASS",
+            "visible_history_status": "complete_visible_history",
+            "captured_at": "2025-07-22T10:00:00+08:00",
+            "requested_since": None,
+            "requested_until": None,
+            "profiles": [
+                {
+                    "uid": uid,
+                    "profile_url": f"https://www.laohu8.com/personal/{uid}/",
+                    "adapter": "tiger",
+                    "expected_streams": ["all"],
+                }
+            ],
+            "streams": [
+                {
+                    "profile_uid": uid,
+                    "stream": "all",
+                    "pages": 1,
+                    "rows": 1,
+                    "unique": 1,
+                    "complete_for_request": True,
+                    "terminal_reason": "has_more_zero",
+                }
+            ],
+            "detail_expected": 1,
+            "detail_successes": 1,
+            "detail_failures": [],
+            "normalization_failures": [],
+            "normalized_records": 1,
+            "media_mode": "none",
+            "skip_media": True,
+            "posts_with_image_content": 0,
+            "media_objects": 0,
+            "media_failures": [],
+            "notes": ["All expected streams per adapter are captured."],
+        }
+        import json as _json
+        (qa / "crawl_audit.json").write_text(
+            _json.dumps(crawl_audit), encoding="utf-8"
+        )
+
+    def _write_minimal_tiger_archive(self, tmp_dir: Path, uid: str) -> None:
+        """Write a minimal Tiger archive (posts.jsonl + empty analysis files)."""
+        import json as _json
+        archive = tmp_dir / "archive"
+        archive.mkdir(parents=True, exist_ok=True)
+        post = {
+            "schema_version": FR.SCHEMA_VERSION,
+            "feed_id": "TIGER-POST-001",
+            "author_uid": uid,
+            "profile_uid": uid,
+            "author_name": "TigerAuthor",
+            "published_at": "2025-07-15T09:00:00+08:00",
+            "published_at_raw": "07-15 09:00",
+            "date": "2025-07-15",
+            "month": "2025-07",
+            "stream_membership": ["all"],
+            "is_column": False,
+            "is_repost": False,
+            "is_original_author": True,
+            "feed_type": 0,
+            "content_type": "帖子/话题",
+            "profile_action": "",
+            "title": "Tiger test post",
+            "text": "Test content about $特斯拉(TSLA)$",
+            "original_text": None,
+            "original_author": None,
+            "symbols": [{"raw": "TSLA", "code": "TSLA", "market": "US", "name": "特斯拉"}],
+            "inferred_symbols": [],
+            "topics": [],
+            "metrics": {"comments": 0, "likes": 0, "reposts": 0, "views": 0},
+            "images": [],
+            "url": "https://www.laohu8.com/post/TIGER-POST-001",
+            "source": {"detail_path": "raw/details/uid/TIGER-POST-001.json", "profile_url": ""},
+            "parse_warnings": [],
+        }
+        posts_path = archive / "posts.jsonl"
+        posts_path.write_text(_json.dumps(post) + "\n", encoding="utf-8")
+        analysis = tmp_dir / "analysis"
+        (analysis / "market").mkdir(parents=True, exist_ok=True)
+        (analysis / "candidates.jsonl").write_text("", encoding="utf-8")
+        (analysis / "claims.reviewed.jsonl").write_text("", encoding="utf-8")
+        (analysis / "market" / "claims_market.jsonl").write_text("", encoding="utf-8")
+
+    def test_audit_tiger_single_stream_passes(self):
+        """adversarial_audit expected_streams_present check PASS for Tiger single-stream archive."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            uid = "88887777"
+            self._make_tiger_crawl_audit(output, uid)
+            self._write_minimal_tiger_archive(output, uid)
+            result = FR.audit(argparse.Namespace(output=tmp))
+        # Tiger single stream must not cause error-level failure
+        stream_check = next(
+            (c for c in result["checks"] if c["name"] == "expected_streams_present"), None
+        )
+        self.assertIsNotNone(stream_check, "expected_streams_present check must exist")
+        self.assertTrue(
+            stream_check["passed"],
+            f"expected_streams_present must PASS for Tiger; detail={stream_check['detail']}"
+        )
+        error_checks = [c for c in result["checks"] if not c["passed"] and c["severity"] == "error"]
+        # No stream-related error should be in the list
+        stream_errors = [c for c in error_checks if "stream" in c["name"]]
+        self.assertEqual(
+            stream_errors, [],
+            f"No stream-related error should appear for Tiger archive; got: {stream_errors}"
+        )
+
+    def test_audit_futu_missing_columns_stream_still_fails(self):
+        """expected_streams_present check FAIL when Futu 'columns' stream is absent (Futu regression guard)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            uid = "12341234"
+            # Write a Futu-style crawl_audit that declares expected_streams=["all","columns"]
+            # but only has "all" in the actual streams list (missing "columns").
+            import json as _json
+            qa = output / "qa"
+            qa.mkdir(parents=True, exist_ok=True)
+            crawl_audit = {
+                "schema_version": FR.SCHEMA_VERSION,
+                "status": "PASS",
+                "visible_history_status": "complete_visible_history",
+                "captured_at": "2025-07-22T10:00:00+08:00",
+                "requested_since": None,
+                "requested_until": None,
+                "profiles": [
+                    {
+                        "uid": uid,
+                        "profile_url": f"https://q.futunn.com/profile/{uid}",
+                        "adapter": "futu",
+                        "expected_streams": ["all", "columns"],
+                    }
+                ],
+                "streams": [
+                    # Only "all" present — "columns" is missing
+                    {
+                        "profile_uid": uid,
+                        "stream": "all",
+                        "pages": 1,
+                        "rows": 1,
+                        "unique": 1,
+                        "complete_for_request": True,
+                        "terminal_reason": "has_more_zero",
+                    }
+                ],
+                "detail_expected": 1,
+                "detail_successes": 1,
+                "detail_failures": [],
+                "normalization_failures": [],
+                "normalized_records": 1,
+                "media_mode": "none",
+                "skip_media": True,
+                "posts_with_image_content": 0,
+                "media_objects": 0,
+                "media_failures": [],
+                "notes": [],
+            }
+            (qa / "crawl_audit.json").write_text(_json.dumps(crawl_audit), encoding="utf-8")
+            # Minimal Futu post
+            archive = output / "archive"
+            archive.mkdir(parents=True, exist_ok=True)
+            post = {
+                "schema_version": FR.SCHEMA_VERSION,
+                "feed_id": "FUTU-POST-001",
+                "author_uid": uid,
+                "profile_uid": uid,
+                "author_name": "FutuAuthor",
+                "published_at": "2025-07-15T09:00:00+08:00",
+                "published_at_raw": "1721001600",
+                "date": "2025-07-15",
+                "month": "2025-07",
+                "stream_membership": ["all"],
+                "is_column": False,
+                "is_repost": False,
+                "is_original_author": True,
+                "feed_type": 0,
+                "content_type": "动态",
+                "profile_action": "",
+                "title": "",
+                "text": "Futu test post.",
+                "original_text": None,
+                "original_author": None,
+                "symbols": [],
+                "inferred_symbols": [],
+                "topics": [],
+                "metrics": {"comments": 0, "likes": 0, "reposts": 0, "views": 0},
+                "images": [],
+                "url": f"https://q.futunn.com/profile/{uid}",
+                "source": {"detail_path": "raw/details/uid/FUTU-POST-001.json", "profile_url": ""},
+                "parse_warnings": [],
+            }
+            (archive / "posts.jsonl").write_text(_json.dumps(post) + "\n", encoding="utf-8")
+            analysis = output / "analysis"
+            (analysis / "market").mkdir(parents=True, exist_ok=True)
+            (analysis / "candidates.jsonl").write_text("", encoding="utf-8")
+            (analysis / "claims.reviewed.jsonl").write_text("", encoding="utf-8")
+            (analysis / "market" / "claims_market.jsonl").write_text("", encoding="utf-8")
+
+            result = FR.audit(argparse.Namespace(output=tmp))
+        stream_check = next(
+            (c for c in result["checks"] if c["name"] == "expected_streams_present"), None
+        )
+        self.assertIsNotNone(stream_check, "expected_streams_present check must exist")
+        self.assertFalse(
+            stream_check["passed"],
+            "expected_streams_present must FAIL when Futu 'columns' stream is absent"
+        )
+        self.assertIn(
+            f"{uid}:columns",
+            str(stream_check.get("detail", "")),
+            "Detail must name the missing columns stream"
+        )
+
+
+    # ------ export-authors URL platform correctness ------
+
+    def _make_post_record(
+        self,
+        uid: str,
+        feed_id: str,
+        profile_url: str,
+        post_url: str,
+        author_name: str = "TestAuthor",
+    ) -> dict:
+        """Build a minimal normalised post dict suitable for _export_authors_impl."""
+        return {
+            "schema_version": FR.SCHEMA_VERSION,
+            "feed_id": feed_id,
+            "author_uid": uid,
+            "profile_uid": uid,
+            "author_name": author_name,
+            "published_at": "2025-07-15T09:00:00+08:00",
+            "published_at_raw": "07-15 09:00",
+            "date": "2025-07-15",
+            "month": "2025-07",
+            "stream_membership": ["all"],
+            "is_column": False,
+            "is_repost": False,
+            "is_original_author": True,
+            "feed_type": 0,
+            "content_type": "帖子/话题",
+            "profile_action": "",
+            "title": "Test title",
+            "text": "Test post body.",
+            "original_text": None,
+            "original_author": None,
+            "symbols": [],
+            "inferred_symbols": [],
+            "topics": [],
+            "metrics": {"comments": 0, "likes": 0, "reposts": 0, "views": 0},
+            "images": [],
+            "url": post_url,
+            "source": {"detail_path": f"raw/details/{uid}/{feed_id}.json", "profile_url": profile_url},
+            "parse_warnings": [],
+        }
+
+    def test_export_authors_tiger_uses_laohu8_links(self):
+        """export-authors: Tiger posts produce laohu8.com links in md and index; no q.futunn.com."""
+        tiger_uid = "77778888"
+        tiger_profile_url = f"https://www.laohu8.com/personal/{tiger_uid}/"
+        tiger_post_url = "https://www.laohu8.com/post/99001122"
+        posts = [
+            self._make_post_record(
+                uid=tiger_uid,
+                feed_id="99001122",
+                profile_url=tiger_profile_url,
+                post_url=tiger_post_url,
+                author_name="TigerBlogger",
+            )
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            FR._export_authors_impl(output, posts)
+            by_author = output / "archive" / "by-author"
+            # Find the author md file
+            md_files = [f for f in by_author.iterdir() if f.suffix == ".md" and f.name != "index.md"]
+            self.assertEqual(len(md_files), 1, "should produce exactly one author md file")
+            md_text = md_files[0].read_text(encoding="utf-8")
+            index_text = (by_author / "index.md").read_text(encoding="utf-8")
+
+        # Author md: profile URL must be laohu8, not futunn
+        self.assertIn(tiger_profile_url, md_text, "laohu8 profile URL must appear in author md")
+        self.assertNotIn("q.futunn.com", md_text, "q.futunn.com must NOT appear in Tiger author md")
+
+        # Post URL must be laohu8
+        self.assertIn(tiger_post_url, md_text, "laohu8 post URL must appear in author md")
+
+        # Index: profile link must point to laohu8
+        self.assertIn(tiger_profile_url, index_text, "laohu8 profile URL must appear in index.md")
+        self.assertNotIn("q.futunn.com", index_text, "q.futunn.com must NOT appear in Tiger index.md")
+
+    def test_export_authors_futu_keeps_futunn_links(self):
+        """export-authors: Futu posts retain q.futunn.com links (regression guard)."""
+        futu_uid = "11112222"
+        futu_profile_url = f"https://q.futunn.com/profile/{futu_uid}"
+        futu_post_url = f"https://q.futunn.com/feed/FEED001?lang=zh-cn"
+        posts = [
+            self._make_post_record(
+                uid=futu_uid,
+                feed_id="FEED001",
+                profile_url=futu_profile_url,
+                post_url=futu_post_url,
+                author_name="FutuBlogger",
+            )
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            FR._export_authors_impl(output, posts)
+            by_author = output / "archive" / "by-author"
+            md_files = [f for f in by_author.iterdir() if f.suffix == ".md" and f.name != "index.md"]
+            self.assertEqual(len(md_files), 1)
+            md_text = md_files[0].read_text(encoding="utf-8")
+            index_text = (by_author / "index.md").read_text(encoding="utf-8")
+
+        # Profile URL and post URL should be futunn
+        self.assertIn(futu_profile_url, md_text, "futunn profile URL must appear in Futu author md")
+        self.assertIn(futu_post_url, md_text, "futunn post URL must appear in Futu author md")
+        self.assertIn(futu_profile_url, index_text, "futunn profile URL must appear in index.md")
+        # laohu8 must NOT appear in a Futu-only export
+        self.assertNotIn("laohu8.com", md_text, "laohu8.com must NOT appear in Futu author md")
+        self.assertNotIn("laohu8.com", index_text, "laohu8.com must NOT appear in Futu index.md")
 
 
 if __name__ == "__main__":

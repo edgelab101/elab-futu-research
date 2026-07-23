@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Archive and analyze public Futu profile content with an auditable evidence chain.
+"""Archive and analyze public brokerage-community profile content (Futu + Tiger) with an auditable evidence chain.
 
 The core path intentionally uses only the Python standard library. Platform
 endpoints are unofficial implementation details and are validated at runtime.
@@ -19,6 +19,7 @@ import contextlib
 import csv
 import hashlib
 import html
+import html.parser
 import json
 import math
 import os
@@ -35,7 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 SCHEMA_VERSION = "1.0"
 LIST_URL = "https://q.futunn.com/nnq/personal-list"
 REPORT_FOOTER = (
@@ -51,6 +52,11 @@ EASTMONEY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 USER_AGENT = (
     "elab-futu-research/1.0 "
     "(public-research-tool; +https://github.com/edgelab101/elab-futu-research)"
+)
+# Tiger Brokerage (laohu8.com) requires a browser User-Agent to avoid HTTP 403.
+TIGER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
 
@@ -1345,7 +1351,7 @@ def write_archive_files(output: Path, records: Sequence[Dict[str, Any]]) -> None
         by_month[str(row.get("month") or "unknown")].append(row)
     for month, rows in sorted(by_month.items()):
         lines = [
-            f"# 富途公开内容归档 · {month}",
+            f"# 公开内容归档 · {month}",
             "",
             f"> {len(rows)} 条。原创与转发均保存；是否原创见每条标记。",
             "",
@@ -1398,6 +1404,891 @@ def write_archive_files(output: Path, records: Sequence[Dict[str, Any]]) -> None
         atomic_write_text(monthly_dir / f"{month}.md", "\n".join(lines))
 
 
+# ─── Capture-adapter layer ─────────────────────────────────────────────────────
+#
+# A CaptureAdapter bundles all platform-specific knowledge about how to fetch
+# content from one particular social/brokerage platform.  The rest of the
+# pipeline (archive, etc.) speaks only through this interface so that Stage B
+# can add TigerAdapter without touching archive().
+#
+# Duck-type contract — every adapter must implement these methods:
+#
+#   name: str
+#       Human-readable platform identifier, e.g. "futu".
+#
+#   matches(url_or_uid: str) -> bool
+#       Return True if this adapter can handle the given URL or UID string.
+#       Called by select_adapter() to find the right adapter for each input.
+#
+#   resolve_uid(url_or_uid: str) -> str
+#       Parse the profile URL or bare UID into a canonical UID string.
+#       Raises ResearchError for invalid input.
+#
+#   profile_url(uid: str) -> str
+#       Return the canonical public profile URL for the given UID.
+#
+#   crawl_streams_for_uid(uid, output, since_dt, refresh, max_pages)
+#       -> List[Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]]
+#       Fetch all content streams for this profile.  Returns a list of
+#       (feeds_dict, audit_row) pairs — one per stream.  feeds_dict maps
+#       feed_id to the raw list-API feed object; audit_row is the crawl audit
+#       dict and must contain a "stream" key with the label ("all"/"columns").
+#
+#   fetch_posts(uid, feed_ids, output, workers)
+#       -> Tuple[List[str], List[Dict[str, Any]]]
+#       Retrieve full detail payloads for the given feed IDs.  Returns
+#       (successes, failures) matching fetch_details() semantics exactly.
+#
+#   normalize_post(path, uid, stream_membership, media_by_feed, profile_url_str)
+#       -> Dict[str, Any]
+#       Normalize a detail JSON file into the posts.jsonl record schema.
+#       Matches normalize_detail() semantics exactly.
+
+
+class CaptureAdapter:
+    """Abstract base for platform capture adapters.
+
+    Subclasses must override all methods and set name to a non-empty string.
+    Calling any unoverridden method raises NotImplementedError.
+    """
+
+    name: str = ""
+    # Labels of the streams this adapter produces per UID.  The adversarial
+    # audit checks that every UID in the archive has exactly these streams
+    # recorded.  Override in each subclass so audit() never has to hard-code
+    # platform assumptions.
+    expected_streams: List[str] = []
+
+    def matches(self, url_or_uid: str) -> bool:
+        raise NotImplementedError(f"{type(self).__name__}.matches")
+
+    def resolve_uid(self, url_or_uid: str) -> str:
+        raise NotImplementedError(f"{type(self).__name__}.resolve_uid")
+
+    def profile_url(self, uid: str) -> str:
+        raise NotImplementedError(f"{type(self).__name__}.profile_url")
+
+    def crawl_streams_for_uid(
+        self,
+        uid: str,
+        output: Path,
+        since_dt: Optional[datetime],
+        refresh: bool,
+        max_pages: int,
+    ) -> List[Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]]:
+        raise NotImplementedError(f"{type(self).__name__}.crawl_streams_for_uid")
+
+    def fetch_posts(
+        self,
+        uid: str,
+        feed_ids: Sequence[str],
+        output: Path,
+        workers: int,
+    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+        raise NotImplementedError(f"{type(self).__name__}.fetch_posts")
+
+    def normalize_post(
+        self,
+        path: Path,
+        uid: str,
+        stream_membership: Sequence[str],
+        media_by_feed: Dict[str, List[Dict[str, Any]]],
+        profile_url_str: str,
+    ) -> Dict[str, Any]:
+        raise NotImplementedError(f"{type(self).__name__}.normalize_post")
+
+
+class FutuAdapter(CaptureAdapter):
+    """Capture adapter for Futu (q.futunn.com) using the JSON list/detail API.
+
+    Each method is a thin wrapper around the corresponding module-level function
+    (crawl_stream, fetch_details, normalize_detail).  Keeping those functions at
+    module scope means existing tests can continue to intercept them via
+    mock.patch.object(FR, "crawl_stream", ...) without any wiring changes.
+    """
+
+    name = "futu"
+    # Futu exposes two streams per profile: dynamics/all (type 301) and columns (type 302).
+    expected_streams: List[str] = ["all", "columns"]
+
+    def matches(self, url_or_uid: str) -> bool:
+        """Match q.futunn.com profile URLs and bare numeric UIDs (default platform)."""
+        candidate = str(url_or_uid or "").strip()
+        if "q.futunn.com" in candidate:
+            return True
+        # Bare numeric strings default to Futu for backward compatibility.
+        if re.fullmatch(r"\d{3,20}", candidate):
+            return True
+        return False
+
+    def resolve_uid(self, url_or_uid: str) -> str:
+        return parse_uid(url_or_uid)
+
+    def profile_url(self, uid: str) -> str:
+        return f"https://q.futunn.com/profile/{uid}"
+
+    def crawl_streams_for_uid(
+        self,
+        uid: str,
+        output: Path,
+        since_dt: Optional[datetime],
+        refresh: bool,
+        max_pages: int,
+    ) -> List[Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]]:
+        """Crawl both Futu streams (type 301 = all dynamics, type 302 = columns).
+
+        Calls the module-level crawl_stream function for each stream type so
+        that mock.patch.object(FR, "crawl_stream", ...) continues to intercept
+        these calls in tests without any change to test wiring.
+        """
+        results: List[Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]] = []
+        for feed_type in STREAMS:
+            feeds, audit = crawl_stream(uid, feed_type, output, since_dt, refresh, max_pages)
+            results.append((feeds, audit))
+        return results
+
+    def fetch_posts(
+        self,
+        uid: str,
+        feed_ids: Sequence[str],
+        output: Path,
+        workers: int,
+    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+        return fetch_details(uid, feed_ids, output, workers)
+
+    def normalize_post(
+        self,
+        path: Path,
+        uid: str,
+        stream_membership: Sequence[str],
+        media_by_feed: Dict[str, List[Dict[str, Any]]],
+        profile_url_str: str,
+    ) -> Dict[str, Any]:
+        return normalize_detail(path, uid, stream_membership, media_by_feed, profile_url_str)
+
+
+# ─── Tiger community adapter (laohu8.com) ─────────────────────────────────────
+
+# laohu8.com encodes stock tags as  $中文名(CODE)$  (Chinese label + ticker in parens).
+# Plain  $CODE$  tags (all-ASCII) are also used for indices and ETFs.
+_TIGER_SYMBOL_PAREN_RE = re.compile(r"\$[^$]*?\(([A-Za-z][A-Za-z0-9]{0,9})\)\$")
+_TIGER_SYMBOL_PLAIN_RE = re.compile(r"\$([A-Za-z][A-Za-z0-9]{0,9})\$")
+
+
+def _tiger_extract_symbols(text: str) -> List[Dict[str, Any]]:
+    """Extract and canonicalize stock symbols from Tiger community post text.
+
+    Handles two formats:
+      $中文名(TSLA)$  →  extract TSLA from inside parens  (preferred, explicit)
+      $TSLA$          →  extract TSLA directly             (fallback, ASCII-only)
+
+    Returns a list of canonical symbol dicts (same structure as inferred_symbols()).
+    """
+    seen: Dict[str, Dict[str, Any]] = {}
+    # Priority 1: parenthesised format  $...(CODE)$
+    for match in _TIGER_SYMBOL_PAREN_RE.finditer(text):
+        code = match.group(1).upper()
+        sym = canonical_symbol(code)
+        if sym and code not in seen:
+            seen[code] = sym
+    # Priority 2: plain  $CODE$  (skip if already captured by Priority 1)
+    for match in _TIGER_SYMBOL_PLAIN_RE.finditer(text):
+        code = match.group(1).upper()
+        if code not in seen:
+            sym = canonical_symbol(code)
+            if sym:
+                seen[code] = sym
+    return [seen[k] for k in sorted(seen)]
+
+
+def _tiger_fetch_html(url: str, attempts: int = 4, timeout: int = 45) -> str:
+    """Fetch a Tiger community page as UTF-8 text using a browser User-Agent.
+
+    laohu8.com returns HTTP 403 to generic bot UAs, so we use TIGER_UA.
+    Raises ResearchError after *attempts* retries on transient network errors.
+    """
+    last_error: Optional[BaseException] = None
+    for attempt in range(attempts):
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": TIGER_UA,
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as error:
+            last_error = error
+            if error.code in (401, 403):
+                raise ResearchError(
+                    f"Tiger access denied ({error.code}) at {url}."
+                ) from error
+            if 400 <= error.code < 500:
+                raise ResearchError(f"HTTP {error.code} at {url}") from error
+            delay = min(30, 1.2 * (2 ** attempt))
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            last_error = error
+            delay = min(30, 1.2 * (2 ** attempt))
+        if attempt + 1 < attempts:
+            time.sleep(delay + random.random() * 0.25)
+    raise ResearchError(
+        f"Tiger fetch failed after {attempts} attempts: {url}: {last_error}"
+    )
+
+
+class _TigerDetailExtractor(html.parser.HTMLParser):
+    """html.parser-based extractor for Tiger post detail pages.
+
+    Captures all text content inside the
+    <article class="post-article article-content-wrapper"> container.
+    HTML character references are decoded automatically because HTMLParser
+    defaults to convert_charrefs=True in Python 3.4+.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._article_depth: int = 0
+        self._in_article: bool = False
+        self._parts: List[str] = []
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: List[Tuple[str, Optional[str]]],
+    ) -> None:
+        cls = dict(attrs).get("class") or ""
+        if not self._in_article and "post-article" in cls:
+            self._in_article = True
+            self._article_depth = 1
+            return
+        if self._in_article and tag not in ("br", "img", "hr", "input", "meta", "link"):
+            self._article_depth += 1
+        # Insert a newline before block-level elements to separate paragraphs.
+        if self._in_article and tag in ("p", "div", "br", "h1", "h2", "h3", "h4", "li", "tr"):
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._in_article and tag not in ("br", "img", "hr", "input", "meta", "link"):
+            self._article_depth -= 1
+            if self._article_depth <= 0:
+                self._in_article = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_article:
+            self._parts.append(data)
+
+    def result(self) -> str:
+        """Return extracted text, cleaned of excess blank lines."""
+        raw = "".join(self._parts)
+        # Collapse 3+ consecutive newlines; strip leading/trailing whitespace.
+        return re.sub(r"\n{3,}", "\n\n", raw).strip()
+
+
+class TigerAdapter(CaptureAdapter):
+    """Capture adapter for Tiger Brokerage community (laohu8.com).
+
+    Scrapes SSR HTML from the public personal page; no login, cookie, or
+    API key is required.  Pagination uses a post-id cursor: the minimum
+    post_id on each page becomes the startFromId for the next request.
+
+    Single-stream: Tiger pages expose all posts in a unified listing (no
+    separate "all" vs "columns" streams like Futu).  crawl_streams_for_uid
+    returns a one-element list so archive() works without modification.
+
+    Media: image extraction is not implemented in this release.  --media has
+    no effect for Tiger profiles; the archive will be text-only.
+    """
+
+    name = "tiger"
+    # Tiger exposes a single unified post stream per profile (no column stream).
+    # The stream label emitted into crawl_audit and stream_membership is "all",
+    # matching the actual audit_row["stream"] value from crawl_streams_for_uid().
+    expected_streams: List[str] = ["all"]
+
+    # ── URL / UID ──────────────────────────────────────────────────────────────
+
+    def matches(self, url_or_uid: str) -> bool:
+        """Return True when the input contains 'laohu8.com'.
+
+        Bare numeric strings do NOT match — they continue to route to FutuAdapter
+        for backward compatibility.
+        """
+        return "laohu8.com" in str(url_or_uid or "")
+
+    def resolve_uid(self, url_or_uid: str) -> str:
+        """Extract the numeric UID from a laohu8.com/personal/{uid}/ URL."""
+        candidate = str(url_or_uid or "").strip()
+        m = re.search(r"laohu8\.com/personal/(\d+)", candidate)
+        if m:
+            return m.group(1)
+        raise ResearchError(
+            f"Cannot extract Tiger UID from {candidate!r}. "
+            "Expected a URL such as https://www.laohu8.com/personal/<uid>/."
+        )
+
+    def profile_url(self, uid: str) -> str:
+        return f"https://www.laohu8.com/personal/{uid}/"
+
+    # ── List page parsing ──────────────────────────────────────────────────────
+
+    def _parse_list_page(
+        self,
+        html_text: str,
+        today: date,
+    ) -> Tuple[List[str], Dict[str, str], str]:
+        """Parse a Tiger personal page HTML listing.
+
+        Returns (ordered_post_ids, time_map, cursor).
+        - ordered_post_ids: deduplicated post IDs in page order
+        - time_map:         {post_id: raw_publish_time_string}
+        - cursor:           str(min_post_id) used as startFromId for next page,
+                            or "" when the page is empty
+
+        Implementation notes:
+        - Each post link appears twice in the HTML (content + action area); we
+          deduplicate while preserving first-appearance order.
+        - Each tweet-item has two publish-time spans: the first contains "·"
+          (a bullet separator), the second contains the actual time string.
+          We collect all, filter out separators, and pair by position.
+        """
+        # Deduplicate post IDs while preserving first-appearance order.
+        seen: set = set()
+        post_ids: List[str] = []
+        for m in re.finditer(r'href="/post/(\d+)"', html_text):
+            pid = m.group(1)
+            if pid not in seen:
+                seen.add(pid)
+                post_ids.append(pid)
+
+        # Collect all publish-time span values; filter out the "·" separator.
+        # Pattern matches both class="publish-time" and class="publish-time px-2".
+        times: List[str] = [
+            t.strip()
+            for t in re.findall(
+                r'class="publish-time[^"]*"[^>]*>([^<]*)<', html_text
+            )
+            if t.strip() and t.strip() not in ("·", "・", "·", "•")
+        ]
+
+        # Pair post IDs with times by position (SSR renders them in matching order).
+        time_map: Dict[str, str] = {
+            pid: (times[i] if i < len(times) else "")
+            for i, pid in enumerate(post_ids)
+        }
+
+        cursor = str(min(int(p) for p in post_ids)) if post_ids else ""
+        return post_ids, time_map, cursor
+
+    def _parse_publish_time(
+        self,
+        raw: str,
+        crawl_date: date,
+    ) -> Tuple[Optional[datetime], Optional[str]]:
+        """Convert a raw publish-time string to (datetime, ISO-8601 string).
+
+        Handles four formats observed on laohu8.com:
+          HH:MM        -> today (crawl_date) at HH:MM CST
+          MM-DD HH:MM  -> current calendar year, MM-DD at HH:MM CST
+          MM-DD        -> current calendar year, MM-DD at 00:00 CST
+          YYYY-MM-DD   -> that specific date at 00:00 CST
+
+        Returns (None, None) for unrecognised or unparseable input.
+        """
+        raw = str(raw or "").strip()
+        if not raw:
+            return None, None
+
+        # HH:MM — same-day posts (page loaded today)
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", raw)
+        if m:
+            hh, mm = int(m.group(1)), int(m.group(2))
+            try:
+                dt = datetime.combine(crawl_date, datetime_time(hh, mm, 0), tzinfo=CN_TZ)
+                return dt, dt.isoformat(timespec="seconds")
+            except ValueError:
+                return None, None
+
+        # MM-DD HH:MM — earlier this calendar year with a specific time
+        m = re.fullmatch(r"(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})", raw)
+        if m:
+            mon, day = int(m.group(1)), int(m.group(2))
+            hh, mm = int(m.group(3)), int(m.group(4))
+            try:
+                dt = datetime(crawl_date.year, mon, day, hh, mm, 0, tzinfo=CN_TZ)
+                return dt, dt.isoformat(timespec="seconds")
+            except ValueError:
+                return None, None
+
+        # YYYY-MM-DD — older posts with an explicit year
+        m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", raw)
+        if m:
+            yr, mon, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            try:
+                dt = datetime(yr, mon, day, 0, 0, 0, tzinfo=CN_TZ)
+                return dt, dt.isoformat(timespec="seconds")
+            except ValueError:
+                return None, None
+
+        # MM-DD — current year, no time component
+        m = re.fullmatch(r"(\d{2})-(\d{2})", raw)
+        if m:
+            mon, day = int(m.group(1)), int(m.group(2))
+            try:
+                dt = datetime(crawl_date.year, mon, day, 0, 0, 0, tzinfo=CN_TZ)
+                return dt, dt.isoformat(timespec="seconds")
+            except ValueError:
+                return None, None
+
+        return None, None
+
+    # ── Stream crawl ───────────────────────────────────────────────────────────
+
+    def crawl_streams_for_uid(
+        self,
+        uid: str,
+        output: Path,
+        since_dt: Optional[datetime],
+        refresh: bool,
+        max_pages: int,
+    ) -> List[Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]]:
+        """Crawl the Tiger personal page with cursor-based pagination.
+
+        Returns a list with ONE (feeds, audit) pair.  Tiger has a single stream
+        ("all"), unlike Futu which provides two (all + columns).  archive() is
+        designed to iterate over this list so single-stream adapters are handled
+        transparently.
+        """
+        list_dir = output / "raw" / "list" / uid / "all"
+        list_dir.mkdir(parents=True, exist_ok=True)
+
+        crawl_date = datetime.now(CN_TZ).date()
+        page = 1
+        cursor = ""
+        feeds: Dict[str, Dict[str, Any]] = {}
+        metadata: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        terminal_reason = "error"
+        seen_pid_sets: set = set()
+        older_streak = 0
+
+        while page <= max_pages:
+            cache_path = list_dir / f"page_{page:05d}.html"
+            source = "network"
+            html_text: Optional[str] = None
+
+            if cache_path.exists() and not refresh:
+                html_text = cache_path.read_text(encoding="utf-8")
+                source = "cache"
+
+            if html_text is None:
+                if page == 1:
+                    url = f"https://www.laohu8.com/personal/{uid}/"
+                else:
+                    url = (
+                        f"https://www.laohu8.com/personal/{uid}/"
+                        f"?page={page}&startFromId={cursor}"
+                    )
+                try:
+                    html_text = _tiger_fetch_html(url)
+                    cache_path.write_text(html_text, encoding="utf-8")
+                except ResearchError as error:
+                    errors.append(str(error))
+                    terminal_reason = "error"
+                    break
+
+            post_ids, time_map, next_cursor = self._parse_list_page(html_text, crawl_date)
+
+            # Detect cursor loops: same post-id set returned on two successive pages.
+            pid_sig = frozenset(post_ids)
+            if pid_sig and pid_sig in seen_pid_sets:
+                terminal_reason = "cursor_loop"
+                errors.append(f"Repeated post set at page {page}; possible cursor loop.")
+                break
+            if pid_sig:
+                seen_pid_sets.add(pid_sig)
+
+            if not post_ids:
+                terminal_reason = "has_more_zero"
+                break
+
+            new_ids = 0
+            timestamps: List[int] = []
+            for pid in post_ids:
+                raw_time = time_map.get(pid, "")
+                dt, iso = self._parse_publish_time(raw_time, crawl_date)
+                ts = int(dt.timestamp()) if dt else 0
+                if pid not in feeds:
+                    new_ids += 1
+                feeds[pid] = {
+                    # feed_comm format enables list_feed_id() and list_timestamp()
+                    # used by archive() to build the feed index.
+                    "feed_comm": {"feed_id": pid, "timestamp": ts},
+                    "_tiger_publish_time_raw": raw_time,
+                    "_tiger_published_at": iso,
+                }
+                if ts:
+                    timestamps.append(ts)
+
+            metadata.append({
+                "page": page,
+                "source": source,
+                "rows": len(post_ids),
+                "new_ids": new_ids,
+                "newest_epoch": max(timestamps) if timestamps else None,
+                "oldest_epoch": min(timestamps) if timestamps else None,
+                # Tiger has no explicit has_more flag; assume more until we get an empty page.
+                "has_more": True,
+                "cursor": next_cursor,
+            })
+            log(
+                f"[{uid}/tiger-all] page={page} rows={len(post_ids)} "
+                f"unique={len(feeds)} source={source}"
+            )
+
+            # Stop early when all posts on this page predate --since.
+            if since_dt and timestamps and max(timestamps) < int(since_dt.timestamp()):
+                older_streak += 1
+            else:
+                older_streak = 0
+            if since_dt and older_streak >= 2:
+                terminal_reason = "since_boundary"
+                break
+
+            cursor = next_cursor
+            if not cursor:
+                terminal_reason = "has_more_zero"
+                break
+
+            page += 1
+            if source == "network":
+                time.sleep(1.2 + random.random() * 0.25)
+        else:
+            terminal_reason = "max_pages"
+            errors.append(f"Stopped at safety limit max_pages={max_pages}.")
+
+        complete = terminal_reason == "has_more_zero" or (
+            since_dt is not None and terminal_reason == "since_boundary"
+        )
+        audit: Dict[str, Any] = {
+            "profile_uid": uid,
+            "stream": "all",
+            "feed_type": 0,
+            "pages_saved": len(metadata),
+            "unique_feed_ids": len(feeds),
+            "terminal_reason": terminal_reason,
+            "complete_for_request": complete,
+            "pages": metadata,
+            "errors": errors,
+        }
+        return [(feeds, audit)]
+
+    # ── Detail page parsing ────────────────────────────────────────────────────
+
+    def _parse_detail_page(
+        self,
+        html_text: str,
+        post_id: str,
+        publish_time_from_list: str = "",
+    ) -> Dict[str, Any]:
+        """Parse a Tiger post detail HTML page.
+
+        Returns a Tiger-format detail dict that is stored at
+        raw/details/{uid}/{post_id}.json and read later by normalize_post().
+        This format is distinct from the Futu JSON format.
+        """
+        # Title: prefer <h2 class="post-title">, fall back to og:title meta tag.
+        title = ""
+        m = re.search(r'<h2[^>]*class="post-title"[^>]*>([^<]+)</h2>', html_text)
+        if m:
+            title = html.unescape(m.group(1).strip())
+        if not title:
+            m = re.search(
+                r'<meta[^>]+property="og:title"[^>]+content="([^"]*)"', html_text
+            )
+            if m:
+                title = html.unescape(m.group(1).strip())
+
+        # Author name: locate inside class="post-author" and read <a title="...">
+        author_name_val = ""
+        m = re.search(
+            r'class="post-author".*?<a[^>]+title="([^"]*)"', html_text, re.DOTALL
+        )
+        if m:
+            author_name_val = html.unescape(m.group(1).strip())
+
+        # Author UID: from href="/personal/{uid}/" inside the post-author block.
+        author_uid_val = ""
+        m = re.search(
+            r'class="post-author".*?href="/personal/(\d+)/"', html_text, re.DOTALL
+        )
+        if m:
+            author_uid_val = m.group(1)
+
+        # Publish time from detail page (class="post-time" span).
+        publish_time_detail = ""
+        m = re.search(r'class="post-time"[^>]*>([^<]+)<', html_text)
+        if m:
+            publish_time_detail = m.group(1).strip()
+
+        # Full article text via _TigerDetailExtractor (html.parser-based).
+        extractor = _TigerDetailExtractor()
+        extractor.feed(html_text)
+        text = extractor.result()
+
+        return {
+            "source": "tiger",
+            "post_id": post_id,
+            "author_name": author_name_val,
+            "author_uid": author_uid_val,
+            "title": title,
+            "text": text,
+            "publish_time_list": publish_time_from_list,
+            "publish_time_detail": publish_time_detail,
+            "url": f"https://www.laohu8.com/post/{post_id}",
+        }
+
+    def _build_time_map_from_cache(
+        self,
+        uid: str,
+        output: Path,
+    ) -> Dict[str, str]:
+        """Build {post_id: raw_publish_time} from previously cached list HTML pages."""
+        time_map: Dict[str, str] = {}
+        list_dir = output / "raw" / "list" / uid / "all"
+        if not list_dir.exists():
+            return time_map
+        today = datetime.now(CN_TZ).date()
+        for html_path in sorted(list_dir.glob("page_*.html")):
+            try:
+                html_text = html_path.read_text(encoding="utf-8")
+                _, page_time_map, _ = self._parse_list_page(html_text, today)
+                time_map.update(page_time_map)
+            except Exception as error:
+                log(f"[tiger] Warning: could not parse list cache {html_path}: {error}")
+        return time_map
+
+    # ── Post detail fetching ───────────────────────────────────────────────────
+
+    def fetch_posts(
+        self,
+        uid: str,
+        feed_ids: Sequence[str],
+        output: Path,
+        workers: int,
+    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+        """Download Tiger post detail pages and save Tiger-format JSON files.
+
+        Saves each file at output/raw/details/{uid}/{post_id}.json.
+        """
+        detail_dir = output / "raw" / "details" / uid
+        detail_dir.mkdir(parents=True, exist_ok=True)
+        time_map = self._build_time_map_from_cache(uid, output)
+
+        def fetch_one(post_id: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+            path = detail_dir / f"{post_id}.json"
+            if path.exists():
+                try:
+                    cached = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(cached, dict) and cached.get("source") == "tiger":
+                        return post_id, None  # valid cached Tiger detail
+                except (json.JSONDecodeError, OSError):
+                    pass  # stale or corrupt — fall through to re-fetch
+            url = f"https://www.laohu8.com/post/{post_id}"
+            try:
+                html_text = _tiger_fetch_html(url)
+                detail = self._parse_detail_page(
+                    html_text, post_id, time_map.get(post_id, "")
+                )
+                atomic_write_json(path, detail)
+                time.sleep(0.7 + random.random() * 0.3)
+                return post_id, None
+            except Exception as error:
+                return None, {"uid": uid, "feed_id": post_id, "error": str(error)}
+
+        successes: List[str] = []
+        failures: List[Dict[str, Any]] = []
+        ordered = sorted(set(feed_ids))
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, min(workers, 3))
+        ) as pool:
+            for index, (success, failure) in enumerate(
+                pool.map(fetch_one, ordered), start=1
+            ):
+                if success:
+                    successes.append(success)
+                if failure:
+                    failures.append(failure)
+                if index % 20 == 0 or index == len(ordered):
+                    log(
+                        f"[{uid}/tiger-details] {index}/{len(ordered)} "
+                        f"ok={len(successes)} failed={len(failures)}"
+                    )
+        return successes, failures
+
+    # ── Normalization ──────────────────────────────────────────────────────────
+
+    def normalize_post(
+        self,
+        path: Path,
+        uid: str,
+        stream_membership: Sequence[str],
+        media_by_feed: Dict[str, List[Dict[str, Any]]],
+        profile_url_str: str,
+    ) -> Dict[str, Any]:
+        """Normalize a Tiger detail JSON into the unified posts.jsonl schema.
+
+        Output schema is field-for-field identical to normalize_detail() so that
+        prepare(), market(), report(), export-authors, and audit all work
+        unchanged for Tiger archives.
+
+        Media: not extracted in this release; images list is always empty.
+        Tiger reposts: not detected in this release; is_repost is always False.
+        """
+        try:
+            detail = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ResearchError(
+                f"Cannot read Tiger detail file {path}: {error}"
+            ) from error
+        if not isinstance(detail, dict) or detail.get("source") != "tiger":
+            raise ResearchError(
+                f"Not a valid Tiger detail file (source field missing or wrong): {path}"
+            )
+
+        post_id = str(detail.get("post_id") or path.stem)
+        author_name_val: Optional[str] = str(detail.get("author_name") or "") or None
+        author_uid_val = str(detail.get("author_uid") or uid)
+        title = str(detail.get("title") or "").strip()
+        text = str(detail.get("text") or "").strip()
+
+        # Resolve publish time: prefer list-page value (more complete date formats)
+        # then fall back to the detail-page time (HH:MM only for same-day posts).
+        crawl_date = datetime.now(CN_TZ).date()
+        published_at: Optional[str] = None
+        published_raw: Optional[str] = None
+        for raw in (
+            str(detail.get("publish_time_list") or ""),
+            str(detail.get("publish_time_detail") or ""),
+        ):
+            raw = raw.strip()
+            if raw and raw not in ("·", "·", "·", ""):
+                dt, iso = self._parse_publish_time(raw, crawl_date)
+                if iso:
+                    published_at = iso
+                    published_raw = raw
+                    break
+
+        date_str: Optional[str] = published_at[:10] if published_at else None
+        month_str: str = published_at[:7] if published_at else "unknown"
+
+        # Extract symbols from Tiger's explicit $...(CODE)$ / $CODE$ tags.
+        # These are equivalent to Futu's tagged symbols and go into "symbols".
+        # Any additional symbols found only by heuristic inference (but not
+        # already covered by explicit tags) go into "inferred_symbols".
+        tagged = _tiger_extract_symbols(f"{title}\n{text}")
+        tagged_codes = {item.get("raw", "").upper() for item in tagged if isinstance(item, dict)}
+        inferred = [
+            sym for sym in inferred_symbols(f"{title}\n{text}")
+            if isinstance(sym, dict) and sym.get("raw", "").upper() not in tagged_codes
+        ]
+
+        # Tiger media extraction is not implemented in this release (--media no-op).
+        media_items = sorted(
+            media_by_feed.get(post_id, []),
+            key=lambda item: safe_int(item.get("index"), 0),
+        )
+
+        warnings: List[str] = []
+        if not published_at:
+            warnings.append("timestamp_parse_error")
+        if not text and not title:
+            warnings.append("empty_extractable_text")
+
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "feed_id": post_id,
+            "author_uid": author_uid_val,
+            "profile_uid": uid,
+            "author_name": author_name_val,
+            "published_at": published_at,
+            "published_at_raw": published_raw,
+            "date": date_str,
+            "month": month_str,
+            "stream_membership": sorted(set(stream_membership)),
+            "is_column": False,          # Tiger has no column / article-series distinction
+            "is_repost": False,          # TODO: detect Tiger repost HTML markers in future
+            "is_original_author": True,
+            "feed_type": 0,
+            "content_type": TYPE_LABELS.get(3, "帖子/话题"),
+            "profile_action": "",
+            "title": title,
+            "text": text,
+            "original_text": None,
+            "original_author": None,
+            "symbols": tagged,
+            "inferred_symbols": inferred,
+            "topics": [],
+            "metrics": {
+                "comments": 0,
+                "likes": 0,
+                "reposts": 0,
+                "views": 0,
+            },
+            "images": [                  # Tiger media not extracted in this release
+                {
+                    "url": item.get("url"),
+                    "source_field": item.get("source_field"),
+                    "local_path": item.get("path") if item.get("status") == "ok" else None,
+                    "status": item.get("status"),
+                }
+                for item in media_items
+            ],
+            "url": str(
+                detail.get("url") or f"https://www.laohu8.com/post/{post_id}"
+            ),
+            "source": {
+                "detail_path": str(path),
+                "profile_url": profile_url_str,
+            },
+            "parse_warnings": warnings,
+        }
+
+
+# Adapter registry — append new instances here to support additional platforms.
+# archive() queries this list via select_adapter(); no other site changes needed.
+_ADAPTERS: List[CaptureAdapter] = [FutuAdapter(), TigerAdapter()]
+
+# Convenience singleton for the Futu adapter — used as a normalisation fallback
+# for index entries that were crawled in a previous session (before this layer).
+_FUTU_ADAPTER: CaptureAdapter = _ADAPTERS[0]
+
+
+def select_adapter(url_or_uid: str) -> CaptureAdapter:
+    """Return the registered adapter that can handle *url_or_uid*.
+
+    Iterates _ADAPTERS in registration order and returns the first match.
+    Raises ResearchError (exit 2) when no adapter matches — this is a
+    user-actionable error (unsupported platform URL or malformed input).
+
+    Supported platforms:
+      - futu:  q.futunn.com URLs or bare numeric UIDs (e.g. "123456")
+      - tiger: laohu8.com personal page URLs
+                (e.g. https://www.laohu8.com/personal/12345/)
+    """
+    candidate = str(url_or_uid or "").strip()
+    for adapter in _ADAPTERS:
+        if adapter.matches(candidate):
+            return adapter
+    supported = ", ".join(a.name for a in _ADAPTERS)
+    raise ResearchError(
+        f"Unsupported profile input {candidate!r}. "
+        f"Supported platforms: {supported}."
+    )
+
+
 def archive(args: argparse.Namespace) -> Dict[str, Any]:
     output = Path(args.output).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -1406,10 +2297,13 @@ def archive(args: argparse.Namespace) -> Dict[str, Any]:
     if since_dt and until_dt and since_dt > until_dt:
         raise ResearchError("--since must be on or before --until.")
     uids = []
+    _adapters_by_uid: Dict[str, CaptureAdapter] = {}
     for profile in args.profile:
-        uid = parse_uid(profile)
+        _adp = select_adapter(profile)
+        uid = _adp.resolve_uid(profile)
         if uid not in uids:
             uids.append(uid)
+            _adapters_by_uid[uid] = _adp
     if not uids:
         raise ResearchError("At least one --profile is required.")
 
@@ -1439,23 +2333,24 @@ def archive(args: argparse.Namespace) -> Dict[str, Any]:
     profiles: Dict[str, Dict[str, Any]] = {}
 
     for uid in uids:
-        profile_url = f"https://q.futunn.com/profile/{uid}"
-        profiles[uid] = {"uid": uid, "profile_url": profile_url}
+        _uid_adapter = _adapters_by_uid[uid]
+        profile_url = _uid_adapter.profile_url(uid)
+        profiles[uid] = {
+            "uid": uid,
+            "profile_url": profile_url,
+            "adapter": _uid_adapter.name,
+            "expected_streams": list(_uid_adapter.expected_streams),
+        }
         combined: Dict[str, Dict[str, Any]] = {}
         memberships: Dict[str, set] = defaultdict(set)
-        for feed_type, label in STREAMS.items():
-            feeds, audit_row = crawl_stream(
-                uid,
-                feed_type,
-                output,
-                since_dt,
-                args.refresh,
-                args.max_pages,
-            )
+        for feeds, audit_row in _uid_adapter.crawl_streams_for_uid(
+            uid, output, since_dt, args.refresh, args.max_pages
+        ):
             stream_audits.append(audit_row)
+            _stream_label = str(audit_row.get("stream") or "")
             for feed_id, feed in feeds.items():
                 combined.setdefault(feed_id, feed)
-                memberships[feed_id].add(label)
+                memberships[feed_id].add(_stream_label)
 
         retained = []
         for feed_id, feed in combined.items():
@@ -1471,7 +2366,7 @@ def archive(args: argparse.Namespace) -> Dict[str, Any]:
                     "stream_membership": sorted(existing_memberships | memberships[feed_id]),
                     "profile_url": profile_url,
                 }
-        successes, failures = fetch_details(
+        successes, failures = _uid_adapter.fetch_posts(
             uid, retained, output, workers=args.detail_workers
         )
         detail_failures.extend(failures)
@@ -1523,15 +2418,16 @@ def archive(args: argparse.Namespace) -> Dict[str, Any]:
         if not within_requested_range(safe_int(item.get("timestamp"), 0), since_dt, until_dt):
             continue
         try:
+            _norm_adp = _adapters_by_uid.get(uid, _FUTU_ADAPTER)
             records.append(
-                normalize_detail(
+                _norm_adp.normalize_post(
                     path,
                     uid,
                     item.get("stream_membership") or [],
                     {
                         feed_id: media_lookup.get((uid, feed_id), [])
                     },
-                    str(item.get("profile_url") or f"https://q.futunn.com/profile/{uid}"),
+                    str(item.get("profile_url") or _norm_adp.profile_url(uid)),
                 )
             )
         except Exception as error:
@@ -1602,7 +2498,7 @@ def archive(args: argparse.Namespace) -> Dict[str, Any]:
         "media_objects": len(media_by_key),
         "media_failures": media_failures,
         "notes": [
-            "Both dynamics/all and columns streams are captured and unioned by feed_id.",
+            "All expected streams per adapter are captured and unioned by feed_id.",
             "All history means all content still returned publicly at capture time.",
             "Deleted, private, restricted, or otherwise unavailable content is outside the archive boundary.",
         ],
@@ -2772,6 +3668,19 @@ def _export_authors_impl(output: Path, posts: List[Dict[str, Any]]) -> Dict[str,
             reverse=True,
         )
 
+        # Resolve the profile home-page URL from any stored post record.
+        # posts carry source.profile_url (set by each adapter's normalize_post),
+        # so we never need to hard-code a platform URL here.
+        author_profile_url: str = ""
+        for _p in author_posts:
+            _src = _p.get("source")
+            if isinstance(_src, dict):
+                _pu = str(_src.get("profile_url") or "").strip()
+                if _pu:
+                    author_profile_url = _pu
+                    break
+        profile_url_display = author_profile_url or f"(uid {uid})"
+
         # OPT-B: strip ASCII control characters that would break markdown headings/tables
         raw_display = author_name or f"UID {uid}"
         display_name = re.sub(r"[\x00-\x1f\x7f]", "", raw_display)
@@ -2779,7 +3688,7 @@ def _export_authors_impl(output: Path, posts: List[Dict[str, Any]]) -> Dict[str,
             f"# {display_name}",
             "",
             f"- **profile_uid**：{uid}",
-            f"- **主页**：https://q.futunn.com/profile/{uid}",
+            f"- **主页**：{profile_url_display}",
             f"- **归档帖数**：原创 {orig_count} 条 / 专栏 {col_count} 条 / 转发 {rep_count} 条",
             f"- **时间跨度**：{date_span}",
             f"- **高频标的 Top 8**：{top_symbols}",
@@ -2833,10 +3742,13 @@ def _export_authors_impl(output: Path, posts: List[Dict[str, Any]]) -> Dict[str,
             likes = safe_int(metrics.get("likes"), 0)
             comments = safe_int(metrics.get("comments"), 0)
             feed_id = str(post.get("feed_id") or "")
-            post_url = str(
-                post.get("url")
-                or (f"https://q.futunn.com/feed/{feed_id}" if feed_id else "")
-            )
+            # Use the canonical URL stored by the adapter in normalize_post (platform-agnostic).
+            # Only fall back to a constructed URL if the record truly lacks one.
+            _raw_url = post.get("url")
+            if _raw_url:
+                post_url = str(_raw_url)
+            else:
+                post_url = ""  # no reliable platform-neutral fallback without the adapter
 
             meta_parts = [f"标的：{sym_str}"]
             if likes > 0 or comments > 0:
@@ -2854,6 +3766,7 @@ def _export_authors_impl(output: Path, posts: List[Dict[str, Any]]) -> Dict[str,
         index_rows.append({
             "author_name": display_name,
             "uid": uid,
+            "profile_url": author_profile_url,
             "total": len(author_posts),
             "orig_count": orig_count,
             "col_count": col_count,
@@ -2880,10 +3793,14 @@ def _export_authors_impl(output: Path, posts: List[Dict[str, Any]]) -> Dict[str,
         )
         # BUG2: escape pipe chars in user-sourced text to prevent column splitting
         safe_author = row["author_name"].replace("|", r"\|")
+        _idx_profile_url = row.get("profile_url") or f"(uid {row['uid']})"
+        _idx_profile_cell = (
+            f"[主页]({_idx_profile_url})" if row.get("profile_url") else _idx_profile_url
+        )
         index_lines.append(
             f"| {safe_author} | {row['uid']} | {total_label} | {row['date_span']} "
             f"| [{row['filename']}]({row['filename']}) "
-            f"| [主页](https://q.futunn.com/profile/{row['uid']}) |"
+            f"| {_idx_profile_cell} |"
         )
     index_lines.append("")
 
@@ -2926,7 +3843,7 @@ def report(args: argparse.Namespace) -> Dict[str, Any]:
             profile_names.setdefault(uid, str(post["author_name"]))
 
     profile_lines = [
-        "# 富途博主历史内容研究",
+        "# 博主历史内容研究",
         "",
         f"> 生成时间：{now_iso()}；模式：`{mode}`。",
         "",
@@ -3210,13 +4127,19 @@ def audit(args: argparse.Namespace) -> Dict[str, Any]:
     streams = crawl.get("streams") or [] if isinstance(crawl, dict) else []
     stream_pairs = {(row.get("profile_uid"), row.get("stream")) for row in streams}
     uids = {str(row.get("profile_uid")) for row in posts if row.get("profile_uid")}
+    # Build per-uid expected stream list from crawl_audit profiles (set by each adapter).
+    # Fall back to ["all", "columns"] (Futu default) for older archives lacking the field.
+    uid_expected: Dict[str, List[str]] = {}
+    for _p in (crawl.get("profiles") or [] if isinstance(crawl, dict) else []):
+        if isinstance(_p, dict) and _p.get("uid"):
+            uid_expected[str(_p["uid"])] = list(_p.get("expected_streams") or ["all", "columns"])
     missing_streams = [
         f"{uid}:{label}"
         for uid in sorted(uids)
-        for label in ("all", "columns")
+        for label in uid_expected.get(uid, ["all", "columns"])
         if (uid, label) not in stream_pairs
     ]
-    add("both_streams_present", not missing_streams, "error", missing_streams)
+    add("expected_streams_present", not missing_streams, "error", missing_streams)
     incomplete_streams = [
         f"{row.get('profile_uid')}:{row.get('stream')}:{row.get('terminal_reason')}"
         for row in streams
@@ -3491,6 +4414,7 @@ def doctor(args: argparse.Namespace) -> Dict[str, Any]:
             label: {"checked": False, "ok": None, "error": None}
             for label in STREAMS.values()
         },
+        "tiger_personal_endpoint": None,
         "notes": [
             "Core workflow has no third-party Python dependency.",
             "No browser cookie, token, or API key is read.",
@@ -3509,36 +4433,91 @@ def doctor(args: argparse.Namespace) -> Dict[str, Any]:
             result["output_error"] = str(error)
     profiles = getattr(args, "profile", None) or []
     if profiles:
-        uid = parse_uid(profiles[0])
-        result["profile_uid"] = uid
-        for feed_type, label in STREAMS.items():
-            probe = result["futu_list_endpoints"][label]
-            probe["checked"] = True
+        profile_input = profiles[0]
+        try:
+            adp = select_adapter(profile_input)
+        except ResearchError:
+            adp = _FUTU_ADAPTER  # fallback; error surfaced below
+        if adp.name == "tiger":
+            # Tiger branch: probe the personal page endpoint.
             try:
-                payload = request_json(
-                    LIST_URL,
-                    {
-                        "type": feed_type,
-                        "num": 1,
-                        "load_list_type": 2,
-                        "target_uid": uid,
-                    },
-                )
-                validate_list_payload(payload)
-                probe["ok"] = True
-                probe["sample_rows"] = len(payload.get("feed") or [])
-                probe["has_more_present"] = "has_more" in payload
-            except Exception as error:
-                probe["ok"] = False
-                probe["error"] = str(error)
+                uid = adp.resolve_uid(profile_input)
+            except ResearchError as error:
+                uid = ""
+                result["tiger_personal_endpoint"] = {
+                    "checked": True,
+                    "ok": False,
+                    "error": str(error),
+                }
+            result["profile_uid"] = uid
+            if uid and result.get("tiger_personal_endpoint") is None:
+                personal_url = adp.profile_url(uid)
+                tiger_probe: Dict[str, Any] = {
+                    "checked": True,
+                    "url": personal_url,
+                    "ok": None,
+                    "error": None,
+                    "http_status": None,
+                    "content_bytes": None,
+                }
+                try:
+                    html_text = _tiger_fetch_html(personal_url, attempts=2, timeout=20)
+                    tiger_probe["ok"] = True
+                    tiger_probe["content_bytes"] = len(html_text.encode("utf-8"))
+                    post_ids, _, _ = TigerAdapter()._parse_list_page(
+                        html_text, datetime.now(CN_TZ).date()
+                    )
+                    tiger_probe["sample_post_count"] = len(post_ids)
+                except ResearchError as error:
+                    tiger_probe["ok"] = False
+                    tiger_probe["error"] = str(error)
+                result["tiger_personal_endpoint"] = tiger_probe
+        else:
+            # Futu branch: parse numeric UID and probe list endpoints.
+            try:
+                uid = parse_uid(profile_input)
+            except ResearchError as error:
+                uid = ""
+                result["notes"].append(f"UID parse error: {error}")
+            result["profile_uid"] = uid
+            if uid:
+                for feed_type, label in STREAMS.items():
+                    probe = result["futu_list_endpoints"][label]
+                    probe["checked"] = True
+                    try:
+                        payload = request_json(
+                            LIST_URL,
+                            {
+                                "type": feed_type,
+                                "num": 1,
+                                "load_list_type": 2,
+                                "target_uid": uid,
+                            },
+                        )
+                        validate_list_payload(payload)
+                        probe["ok"] = True
+                        probe["sample_rows"] = len(payload.get("feed") or [])
+                        probe["has_more_present"] = "has_more" in payload
+                    except Exception as error:
+                        probe["ok"] = False
+                        probe["error"] = str(error)
     endpoint_failed = any(
         item["ok"] is False for item in result["futu_list_endpoints"].values()
+    )
+    tiger_failed = (
+        isinstance(result.get("tiger_personal_endpoint"), dict)
+        and result["tiger_personal_endpoint"].get("ok") is False
     )
     if not profiles:
         # No profile supplied: endpoint connectivity was never tested.
         result["status"] = "PARTIAL"
         result["note"] = "no profile supplied; endpoint checks skipped"
-    elif result["python"]["supported"] and result["output_writable"] is not False and not endpoint_failed:
+    elif (
+        result["python"]["supported"]
+        and result["output_writable"] is not False
+        and not endpoint_failed
+        and not tiger_failed
+    ):
         result["status"] = "PASS"
     else:
         result["status"] = "FAIL"
@@ -3551,7 +4530,10 @@ def add_archive_arguments(parser: argparse.ArgumentParser) -> None:
         "--profile",
         action="append",
         required=True,
-        help="Futu profile URL or numeric UID. Repeat for multiple profiles.",
+        help=(
+            "Futu (q.futunn.com) or Tiger (laohu8.com) profile URL, "
+            "or a numeric Futu UID. Repeat for multiple."
+        ),
     )
     parser.add_argument("--since", help="Start date YYYY-MM-DD; default is all visible history.")
     parser.add_argument("--until", help="End date YYYY-MM-DD; default is today/latest visible.")
